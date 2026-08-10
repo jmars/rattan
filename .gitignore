@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.py-site/
+# LFS-tracked bootstrap tarball is kept in vendor/, but extracted rootfs never
+# committed.
+rootfs/
+sessions/
+layers/
