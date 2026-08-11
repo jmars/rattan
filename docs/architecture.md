@@ -194,8 +194,8 @@ bwrap builds the visible filesystem before exec'ing `/init`:
 |---|---|---|
 | UID in userns | 1000 (own) | 0/0 (root-in-userns) |
 | Network | `--unshare-net` (no network at all) | `--share-net` (full host net) |
-| Landlock | full: `/workspace` RW, `/tmp` RW, everything else RO via overlay | applied to `/workspace` + host binds; **not** applied to `/` (pacman writes `/usr`, `/var/lib/pacman`, etc.) |
-| seccomp | full pledge-style whitelist | minimal: enough for pacman + gpg + curl |
+| Landlock | full: `/workspace` RW, `/tmp` RW, everything else RO via overlay | **not applied** (stage3 skipped — Landlock's deny-by-default model can't express "restrict `/workspace` but leave `/` open") |
+| seccomp | full pledge-style whitelist | **not applied** (stage3 skipped; isolation = userns + bwrap + overlay, no host binds reachable) |
 | Triggered by | every agent command | only `pacman_install` / `pacman_run` MCP tools |
 | Lifetime | per command | per provisioning call (fresh bwrap) |
 
@@ -213,8 +213,12 @@ bwrap builds the visible filesystem before exec'ing `/init`:
 3. **The network grant is bounded in time and tool** — it exists only for the
    duration of a `pacman_install` call. No configuration gives an arbitrary
    agent command network.
-4. **Landlock in provisioning mode is still useful** — it prevents pacman from
-   writing outside the container upperdir even if pacman were compromised.
+4. **Provisioning isolation is userns + bwrap + overlay (no stage3).** Pacman
+   runs directly under bwrap (like bootstrap) with no host bind mounts and no
+   way to reach the host filesystem, so it cannot write outside the container
+   upperdir even if compromised. Landlock/seccomp are skipped because Landlock's
+   deny-by-default model cannot express "restrict `/workspace` but leave `/`
+   open" for pacman's writes to `/usr`, `/var/lib/pacman`, `/etc`.
 5. **Avoids the "agent runs pacman without my permission" footgun** — pacman
    requires a distinct tool call, so the user sees it in the tool-call trace.
 

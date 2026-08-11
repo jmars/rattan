@@ -19,7 +19,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from rattan import capabilities, config, layers, sessions
+from rattan import capabilities, config, layers, pacman, sessions
 from rattan.executor import InvocationError, EmptyInvocation, execute_program
 from rattan.overlay import provision
 from rattan.parser import parse, ParseError
@@ -294,6 +294,43 @@ def _build_tools(fastmcp: FastMCP):
             "removed": removed,
             "count": len(removed),
         }
+
+    @fastmcp.tool(
+        description=(
+            "Install one or more packages via pacman inside the container "
+            "(provisioning mode: root-in-userns, network access). Packages land "
+            "in the session upperdir and are visible to subsequent shell_run "
+            "commands. They are lost on env_discard unless committed via "
+            "env_commit. Set refresh=False to skip 'pacman -Sy'. Optionally "
+            "specify a mirror URL (validated against an allowlist)."
+        )
+    )
+    def pacman_install(
+        packages: list[str],
+        refresh: bool = True,
+        mirror: str | None = None,
+        timeout: float = 300,
+    ) -> dict:
+        try:
+            return pacman.pacman_install(
+                sessions.current(), packages,
+                refresh=refresh, mirror=mirror, timeout=timeout,
+            )
+        except ValueError as e:
+            return {"rc": 1, "command": "pacman -S", "output": str(e), "packages": []}
+
+    @fastmcp.tool(
+        description=(
+            "Run a read-only pacman query inside the container (e.g. '-Q' list "
+            "installed, '-Si pkg' show info, '-F file' search files). "
+            "Provisioning mode, NO network."
+        )
+    )
+    def pacman_run(
+        args: list[str],
+        timeout: float = 60,
+    ) -> dict:
+        return pacman.pacman_run(sessions.current(), args, timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
