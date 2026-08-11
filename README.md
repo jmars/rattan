@@ -8,6 +8,27 @@ Implemented: host capability probe, a C `stage3` inner binary (no_new_privs →
 Landlock → seccomp), a bootstrapped Arch rootfs with pacman, content-addressed
 overlay commits, and 18 MCP tools.
 
+```
+┌───────────────┐   stdio    ┌────────────────────────────────────────────┐
+│  MCP client   │ ◀────────▶ │  rattan server (Python, trusted, unpledged) │
+│  (agent/LLM)  │            └────────────────────────────────────────────┘
+                                      │
+                              bwrap + overlayfs
+                                      │
+                 ┌────────────────────┼─────────────────────┐
+                 ▼                    ▼                     ▼
+        ┌────────────────┐   ┌────────────────┐   ┌──────────────────┐
+        │ base rootfs    │   │ committed      │   │ session upperdir │
+        │ (read-only)    │   │ layers (COW)   │   │ (writable,       │
+        │                │   │                │   │  discard default)│
+        └────────────────┘   └────────────────┘   └──────────────────┘
+                            ┌───────────────────────────────┐
+                            │  /init = stage3 (C binary)     │
+                            │  no_new_privs → Landlock →     │
+                            │  seccomp → execvp(user cmd)    │
+                            └───────────────────────────────┘
+```
+
 ## Security
 
 Layers, outermost to innermost:
