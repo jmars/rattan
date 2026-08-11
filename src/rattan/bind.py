@@ -14,8 +14,17 @@ from dataclasses import dataclass, field
 
 # Host paths that must never be bound into the container (invariant #11).
 FORBIDDEN_HOST_DIRS = ("/etc", "/proc", "/sys")
-# Forbidden relative-to-$HOME dirs.
+# Forbidden relative-to-$HOME dirs (including $HOME itself).
 FORBIDDEN_HOME_SUBDIRS = (".config", ".local", ".cache")
+
+
+def _under(path: str, root: str) -> bool:
+    """True if *path* == *root* or is under *root*."""
+    if not root:
+        return False
+    if root == "/":
+        return True  # everything is under the filesystem root
+    return path == root or path.startswith(root + os.sep)
 
 
 @dataclass
@@ -80,13 +89,21 @@ def _realpath(path: str) -> str:
 def validate_host_bind(host_path: str, mount_point: str, mode: str) -> HostBind:
     """Validate a host-dir bind request.
 
-    Raises ``ValueError`` with a clear message on any violation.
+    Uses a positive-allowlist / deny-list model (invariant #11): rejects the
+    host root, $HOME and its forbidden subdirs, the rattan data dir, and other
+    privileged host locations. Raises ``ValueError`` with a clear message on
+    any violation.
     """
     if mode not in ("ro", "rw"):
         raise ValueError(f"mode must be 'ro' or 'rw', got {mode!r}")
     if not mount_point or not mount_point.startswith("/"):
         raise ValueError(
             f"mount_point must be an absolute container path, got {mount_point!r}"
+        )
+    if any(c in mount_point for c in (";", ":", "\n", "\r", "\x00")):
+        raise ValueError(
+            f"mount_point must not contain ';', ':', or control characters, "
+            f"got {mount_point!r}"
         )
 
     raw = _expand_home(host_path)
@@ -99,22 +116,45 @@ def validate_host_bind(host_path: str, mount_point: str, mode: str) -> HostBind:
     if not os.path.isdir(real):
         raise ValueError(f"host path is not a directory: {raw}")
 
+    # Reject the host root — binding / would expose the entire host filesystem.
+    if real == "/":
+        raise ValueError("binding the host root '/' is forbidden (invariant #11)")
+
     # Forbidden absolute dirs
     for forbidden in FORBIDDEN_HOST_DIRS:
-        if real == forbidden or real.startswith(forbidden + os.sep):
+        if _under(real, forbidden):
             raise ValueError(
                 f"binding {forbidden!r} is forbidden (invariant #11)"
             )
 
-    # Forbidden $HOME subdirs
+    # Forbidden $HOME (and its subdirs). $HOME itself must never be bound.
     home = _expand_home("~")
-    if home and real != home:
-        for sub in FORBIDDEN_HOME_SUBDIRS:
-            cand = os.path.join(home, sub)
-            if real == cand or real.startswith(cand + os.sep):
+    if home:
+        if _under(real, home):
+            # Not forbidden unless it's one of the protected subdirs...
+            if real == home:
                 raise ValueError(
-                    f"binding {sub!r} under $HOME is forbidden (invariant #11)"
+                    "binding $HOME itself is forbidden (invariant #11)"
                 )
+            for sub in FORBIDDEN_HOME_SUBDIRS:
+                cand = os.path.join(home, sub)
+                if _under(real, cand):
+                    raise ValueError(
+                        f"binding {sub!r} under $HOME is forbidden (invariant #11)"
+                    )
+
+    # Never bind the rattan data dir (sessions/layers/rootfs) — an agent could
+    # poison meta.json or committed layers.
+    try:
+        from rattan import config
+    except Exception:
+        config = None
+    if config is not None:
+        data_dir = os.path.realpath(config.data_dir())
+        if _under(real, data_dir):
+            raise ValueError(
+                "binding the rattan data dir is forbidden (invariant #11)"
+            )
 
     return HostBind(
         host_path=real,

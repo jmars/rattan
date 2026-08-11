@@ -6,6 +6,7 @@ and an ``index.json`` under ``flock`` for refcount-based GC.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -19,6 +20,28 @@ from dataclasses import dataclass
 from typing import Optional
 
 from rattan import config
+
+
+# ---------------------------------------------------------------------------
+# Reflink capability probe (cached — probed once per process, not per commit)
+# ---------------------------------------------------------------------------
+
+
+_reflink_ok: Optional[bool] = None
+
+
+def _reflink_available() -> bool:
+    """Cache whether the data filesystem supports reflink (btrfs/xfs)."""
+    global _reflink_ok
+    if _reflink_ok is None:
+        try:
+            from rattan import capabilities
+            table = capabilities.get_capabilities()
+            cap = table.get("reflink_support")
+            _reflink_ok = cap is not None and cap.available
+        except Exception:
+            _reflink_ok = False
+    return _reflink_ok
 
 
 # ---------------------------------------------------------------------------
@@ -105,15 +128,7 @@ def _copy_upper_to_layer(upper: str, dest: str):
     falling back to ``rsync -aHX --delete`` if ACLs are not supported, then
     ``cp -a``, and finally a pure-Python ``shutil.copytree``.
     """
-    try:
-        caps = __import__("rattan.capabilities", fromlist=["get_capabilities"])
-        table = caps.get_capabilities()
-        reflink = table.get("reflink_support")
-        reflink_ok = reflink is not None and reflink.available
-    except Exception:
-        reflink_ok = False
-
-    if reflink_ok:
+    if _reflink_available():
         subprocess.run(
             ["cp", "-a", "--reflink=auto",
              os.path.join(upper, "") + "/.", dest + "/"],
@@ -146,21 +161,39 @@ def _load_index() -> dict:
     return {}
 
 
-def _save_index(index: dict):
-    """Atomically write the index under flock."""
-    layers = config.layers_dir()
-    os.makedirs(layers, exist_ok=True)
+@contextlib.contextmanager
+def _index_lock():
+    """Hold the exclusive flock on the layers index across a read-modify-write."""
     lock_path = config.index_lock_path()
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with open(lock_path, "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:
-            idx_path = os.path.join(layers, "index.json")
-            tmp = idx_path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(index, f, indent=2, sort_keys=True)
-            os.replace(tmp, idx_path)
+            yield lf
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _save_index(index: dict, lock=None):
+    """Atomically write the index.
+
+    If *lock* (an already-locked open file) is given, write WITHOUT re-acquiring
+    (the caller holds the lock across a read-modify-write; re-acquiring would
+    deadlock).  Otherwise acquire the exclusive lock for just the write.
+    """
+    layers = config.layers_dir()
+    os.makedirs(layers, exist_ok=True)
+    idx_path = os.path.join(layers, "index.json")
+    tmp = idx_path + ".tmp"
+    if lock is not None:
+        with open(tmp, "w") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+        os.replace(tmp, idx_path)
+        return
+    with _index_lock():
+        with open(tmp, "w") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+        os.replace(tmp, idx_path)
 
 
 def _compute_manifest(upper_path: str) -> str:
@@ -169,7 +202,10 @@ def _compute_manifest(upper_path: str) -> str:
     Format: ``"<relpath>\\0<mode>\\0<type>\\0[<symlink_target>|<sha256>]\\n"``
     per entry.  ``type`` is one of ``d`` (directory), ``l`` (symlink), or ``f``
     (regular file).  Entries are ordered by relpath (``os.walk`` top-down with
-    sorted dirnames / filenames).  The ``workspace/`` seed directory is excluded.
+    sorted dirnames / filenames).  The ``workspace/`` seed directory IS included:
+    its content is part of the commit identity — without it, two sessions with
+    identical non-workspace state but different ``/workspace`` content would
+    collide and dedupe incorrectly, leaking one session's workspace into another.
     """
     lines: list[str] = []
 
@@ -177,19 +213,13 @@ def _compute_manifest(upper_path: str) -> str:
         rel = os.path.relpath(dirpath, upper_path)
         if rel == ".":
             rel = ""
-        # Skip workspace/ entirely from manifest
-        if rel == "workspace" or rel.startswith("workspace" + os.sep):
-            dirnames[:] = []
-            continue
 
         dirnames.sort()
         filenames.sort()
 
-        # Include directories (except root and workspace)
+        # Include directories (except the root itself)
         for d in dirnames:
             drel = os.path.join(rel, d) if rel else d
-            if drel == "workspace":
-                continue
             st = os.lstat(os.path.join(dirpath, d))
             m = oct(st.st_mode)
             lines.append(f"{drel}\0{m}\0d\0\n")
@@ -244,6 +274,23 @@ def _dirty_file_count(upper_path: str) -> int:
             except OSError:
                 pass
     return count
+
+
+def _upper_stats(upper_path: str) -> tuple[int, int]:
+    """Return (size_bytes, regular_file_count) with a single os.walk."""
+    total = 0
+    count = 0
+    for dirpath, _, filenames in os.walk(upper_path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                st = os.lstat(fp)
+            except OSError:
+                continue
+            total += st.st_size
+            if stat.S_ISREG(st.st_mode):
+                count += 1
+    return total, count
 
 
 # ---------------------------------------------------------------------------
@@ -348,41 +395,45 @@ def commit(session: Session, message: str = "") -> LayerRef:
     os.makedirs(layers_d, exist_ok=True)
 
     layer_path = os.path.join(layers_d, commit_id)
-
-    if not os.path.exists(layer_path):
-        os.makedirs(layer_path)
-        _copy_upper_to_layer(session.upper, layer_path)
-
-    size = _upper_size_bytes(layer_path)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    # Update index
-    index = _load_index()
-    entry = index.get(commit_id, {})
-    if not entry:
-        parent = session.stack[-1] if session.stack else None
-        entry = {
-            "refcount_sessions": 1,
-            "refcount_layers": 0,
-            "parent": parent,
-            "message": message,
-            "created_at": now,
-            "size_bytes": size,
-        }
-        index[commit_id] = entry
-        if parent and parent in index:
-            index[parent]["refcount_layers"] = (
-                index[parent].get("refcount_layers", 0) + 1
-            )
-    else:
-        entry["refcount_sessions"] = entry.get("refcount_sessions", 0) + 1
-        if not entry.get("parent") and session.stack:
-            entry["parent"] = session.stack[-1]
-            if session.stack[-1] in index:
-                index[session.stack[-1]]["refcount_layers"] = (
-                    index[session.stack[-1]].get("refcount_layers", 0) + 1
+    # Hold the index flock across the existence-check + copy + read-modify-write
+    # so a concurrent gc() (which rmtree's only under the lock) cannot delete a
+    # layer this commit is about to reference (M-2). Holding it across the copy
+    # serializes concurrent commits — correctness over throughput.
+    with _index_lock() as lf:
+        if not os.path.exists(layer_path):
+            os.makedirs(layer_path)
+            _copy_upper_to_layer(session.upper, layer_path)
+        size = _upper_size_bytes(layer_path)
+
+        # Update index
+        index = _load_index()
+        entry = index.get(commit_id, {})
+        if not entry:
+            parent = session.stack[-1] if session.stack else None
+            entry = {
+                "refcount_sessions": 1,
+                "refcount_layers": 0,
+                "parent": parent,
+                "message": message,
+                "created_at": now,
+                "size_bytes": size,
+            }
+            index[commit_id] = entry
+            if parent and parent in index:
+                index[parent]["refcount_layers"] = (
+                    index[parent].get("refcount_layers", 0) + 1
                 )
-    _save_index(index)
+        else:
+            entry["refcount_sessions"] = entry.get("refcount_sessions", 0) + 1
+            if not entry.get("parent") and session.stack:
+                entry["parent"] = session.stack[-1]
+                if session.stack[-1] in index:
+                    index[session.stack[-1]]["refcount_layers"] = (
+                        index[session.stack[-1]].get("refcount_layers", 0) + 1
+                    )
+        _save_index(index, lock=lf)
 
     session.stack.append(commit_id)
     _persist_meta(session)
@@ -405,6 +456,14 @@ def _wipe_upper(session: Session):
     if os.path.exists(session.upper):
         _rmtree_force(session.upper)
     os.makedirs(session.upper, exist_ok=True)
+    # The provisioning seed mirrors base dirs into the upper; a fresh upper must
+    # be re-seeded, so drop the seed-completion marker (config.SEED_MARKER).
+    try:
+        marker = os.path.join(session.root, config.SEED_MARKER)
+        if os.path.exists(marker):
+            os.unlink(marker)
+    except OSError:
+        pass
 
 
 def _rmtree_force(path: str):
@@ -435,13 +494,14 @@ def rollback(session: Session, to_commit_id: str):
     removed = session.stack[idx + 1:]
     session.stack = session.stack[: idx + 1]
 
-    index = _load_index()
-    for cid in removed:
-        if cid in index:
-            index[cid]["refcount_sessions"] = max(
-                0, index[cid].get("refcount_sessions", 0) - 1
-            )
-    _save_index(index)
+    with _index_lock() as lf:
+        index = _load_index()
+        for cid in removed:
+            if cid in index:
+                index[cid]["refcount_sessions"] = max(
+                    0, index[cid].get("refcount_sessions", 0) - 1
+                )
+        _save_index(index, lock=lf)
 
     _wipe_upper(session)
     _ensure_workspace(session)
@@ -459,13 +519,14 @@ def reset(session: Session):
 
 def destroy(session: Session):
     """Remove the entire session directory and decrement index refcounts."""
-    index = _load_index()
-    for cid in session.stack:
-        if cid in index:
-            index[cid]["refcount_sessions"] = max(
-                0, index[cid].get("refcount_sessions", 0) - 1
-            )
-    _save_index(index)
+    with _index_lock() as lf:
+        index = _load_index()
+        for cid in session.stack:
+            if cid in index:
+                index[cid]["refcount_sessions"] = max(
+                    0, index[cid].get("refcount_sessions", 0) - 1
+                )
+        _save_index(index, lock=lf)
 
     if os.path.exists(session.root):
         # The overlay workdir may contain read-only or nested entries after a
@@ -482,6 +543,11 @@ def upper_size_bytes(session: Session) -> int:
     return _upper_size_bytes(session.upper)
 
 
+def upper_stats(session: Session) -> tuple[int, int]:
+    """Return ``(size_bytes, regular_file_count)`` for *session* with one walk."""
+    return _upper_stats(session.upper)
+
+
 # ---------------------------------------------------------------------------
 # GC
 # ---------------------------------------------------------------------------
@@ -494,49 +560,53 @@ def gc() -> list[str]:
     ``refcount_layers`` are 0, and it is not referenced by any live session
     stack.  When a layer is removed, its parent's ``refcount_layers`` is
     decremented, potentially making the parent eligible on a subsequent pass.
+
+    The index flock is held for the ENTIRE scan + rmtree + save so a concurrent
+    commit cannot reference a layer this GC pass is deleting (M-2).
     """
-    index = _load_index()
-    layers_d = config.layers_dir()
+    with _index_lock() as lf:
+        index = _load_index()
+        layers_d = config.layers_dir()
 
-    # Collect all commit_ids referenced by live sessions
-    sessions_d = config.sessions_dir()
-    live_stack_ids: set[str] = set()
-    if os.path.isdir(sessions_d):
-        for name in os.listdir(sessions_d):
-            meta = load_meta(os.path.join(sessions_d, name))
-            if meta:
-                for cid in meta.get("stack", []):
-                    live_stack_ids.add(cid)
+        # Collect all commit_ids referenced by live sessions
+        sessions_d = config.sessions_dir()
+        live_stack_ids: set[str] = set()
+        if os.path.isdir(sessions_d):
+            for name in os.listdir(sessions_d):
+                meta = load_meta(os.path.join(sessions_d, name))
+                if meta:
+                    for cid in meta.get("stack", []):
+                        live_stack_ids.add(cid)
 
-    removed: list[str] = []
-    changed = True
-    while changed:
-        changed = False
-        to_remove = []
-        for cid, entry in list(index.items()):
-            if cid in live_stack_ids:
-                continue
-            rc_s = entry.get("refcount_sessions", 0)
-            rc_l = entry.get("refcount_layers", 0)
-            if rc_s <= 0 and rc_l <= 0:
-                to_remove.append(cid)
+        removed: list[str] = []
+        changed = True
+        while changed:
+            changed = False
+            to_remove = []
+            for cid, entry in list(index.items()):
+                if cid in live_stack_ids:
+                    continue
+                rc_s = entry.get("refcount_sessions", 0)
+                rc_l = entry.get("refcount_layers", 0)
+                if rc_s <= 0 and rc_l <= 0:
+                    to_remove.append(cid)
 
-        for cid in to_remove:
-            entry = index.pop(cid, None)
-            if entry is None:
-                continue
-            parent = entry.get("parent")
-            if parent and parent in index:
-                index[parent]["refcount_layers"] = max(
-                    0, index[parent].get("refcount_layers", 0) - 1
-                )
-            layer_path = os.path.join(layers_d, cid)
-            if os.path.exists(layer_path):
-                shutil.rmtree(layer_path)
-            removed.append(cid)
-            changed = True
+            for cid in to_remove:
+                entry = index.pop(cid, None)
+                if entry is None:
+                    continue
+                parent = entry.get("parent")
+                if parent and parent in index:
+                    index[parent]["refcount_layers"] = max(
+                        0, index[parent].get("refcount_layers", 0) - 1
+                    )
+                layer_path = os.path.join(layers_d, cid)
+                if os.path.exists(layer_path):
+                    shutil.rmtree(layer_path)
+                removed.append(cid)
+                changed = True
 
-    _save_index(index)
+        _save_index(index, lock=lf)
     return removed
 
 

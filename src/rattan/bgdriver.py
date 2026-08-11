@@ -15,7 +15,7 @@ import os
 import subprocess
 
 from rattan import layers, parser
-from rattan.executor import Invocation, build_invocation
+from rattan.executor import Invocation, _scrub_control_env, build_invocation
 from rattan.overlay import provision
 
 
@@ -63,6 +63,6 @@ def launch_background_job(
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,            # detached process group
-        env={**os.environ, **inv.env},
+        env={**_scrub_control_env(os.environ), **inv.env},
     )
     return popen, log_fh

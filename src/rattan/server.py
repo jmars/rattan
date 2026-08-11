@@ -177,6 +177,7 @@ def _build_tools(fastmcp: FastMCP):
             provision(session)
         table = capabilities.get_capabilities()
         snapshots = layers.snapshot_list(session)
+        upper_size, upper_files = layers.upper_stats(session)
         return {
             "session": {
                 "id": session.sid,
@@ -195,8 +196,8 @@ def _build_tools(fastmcp: FastMCP):
                 for s in snapshots
             ],
             "upperdir": {
-                "size_bytes": layers.upper_size_bytes(session),
-                "dirty_files": layers.dirty_file_count(session),
+                "size_bytes": upper_size,
+                "dirty_files": upper_files,
             },
             "network_policy": {
                 "agent": "unshare-net (no network)",
@@ -360,7 +361,12 @@ def _build_tools(fastmcp: FastMCP):
             )
         except (ValueError, parser.ParseError, InvocationError) as e:
             return {"error": str(e)}
-        job_id = jobs.start_job(command, cwd, popen, log_path, timeout=timeout)
+        # The child subprocess has its own fd via the fork; close the parent's
+        # copy so we don't leak one fd per job for the server lifetime (M-3).
+        try:
+            job_id = jobs.start_job(command, cwd, popen, log_path, timeout=timeout)
+        finally:
+            log_fh.close()
         return {
             "job_id": job_id,
             "pid": popen.pid,

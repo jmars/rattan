@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 
 from rattan import bwrap
+from rattan.executor import _scrub_control_env
 from rattan.layers import Session
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,6 @@ def _write_temp_mirrorlist(mirror: str) -> str:
 # Provisioning directory seed
 # ---------------------------------------------------------------------------
 
-
 def provisioning_seed(session: Session) -> None:
     """Mirror the base rootfs directory skeleton into the session upperdir.
 
@@ -108,11 +108,17 @@ def provisioning_seed(session: Session) -> None:
     file contents with writable directories — pacman can write anywhere in the
     container, and writes land in the upper (subject to commit/discard).
 
-    Idempotent. Call once per provisioning bwrap spawn (or at session creation).
+    Idempotent. The expensive walk runs once per session *upper* (C1): the
+    completion marker ``<session.root>/config.SEED_MARKER`` short-circuits
+    subsequent calls, and ``layers._wipe_upper`` removes that marker whenever
+    the upper is wiped (commit/discard/reset), so a fresh upper is re-seeded.
     """
     from rattan import config
     base = config.base_rootfs_path()
     if not os.path.isdir(base):
+        return
+    marker = os.path.join(session.root, config.SEED_MARKER)
+    if os.path.exists(marker):
         return
     upper = session.upper
     for dp, _dns, _fns in os.walk(base):
@@ -120,6 +126,13 @@ def provisioning_seed(session: Session) -> None:
         if rel == ".":
             continue
         os.makedirs(os.path.join(upper, rel), exist_ok=True)
+    # Record completion only after the walk; an interrupted run leaves no marker
+    # and is re-seeded next time (makedirs(exist_ok=True) makes that idempotent).
+    try:
+        with open(marker, "w") as f:
+            f.write("1")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +149,66 @@ def _check_packages(packages: list[str]) -> None:
             raise ValueError(
                 f"invalid package name {p!r}: package names must not start with '-'"
             )
+
+
+# Read-only pacman operations accepted by pacman_run. Anything else mutates
+# state and is rejected, so an agent cannot use pacman_run as a second,
+# less-restricted provisioning path (H-1). Every -Q* form is a read-only local
+# database query (accepted). Only the read-only query forms of the sync (-S)
+# and files (-F) operations are allowed; install/upgrade/remove/db and
+# cache-clean (-S, -Sy, -Su, -Sw, -Sc, -Scc, -U, -R, -D) are rejected.
+_QUERY_SAFE_SYNCOPS = {"-Si", "-Sii", "-Sl", "-Ss", "-Sss", "-Sg"}
+_QUERY_SAFE_FILEOPS = {"-F", "-Fl", "-Fs", "-Fh"}
+_QUERY_SAFE_LONG = {
+    "--noconfirm", "--quiet", "--color", "--debug", "--verbose",
+    "--print", "--print-format", "--version", "--help",
+}
+_QUERY_FORBIDDEN_FLAGS = {
+    "--config", "--root", "--dbpath", "--cachedir", "--hookdir",
+    "--gpgdir", "--logfile", "--arch", "--sysroot", "--ignore",
+    "--ignoregroup", "--assume-installed", "--needed",
+}
+
+
+def _check_query_args(args: list[str]) -> None:
+    """Reject any pacman_run arg that isn't a safe read-only query flag.
+
+    Operation-letter clusters are parsed: ``-Q*`` is always read-only; ``-S*``
+    and ``-F*`` are only allowed in their specific read-only query forms;
+    ``-U``/``-R``/``-D`` and bare/upgrading/cleaning ``-S`` forms are rejected
+    (H-1). Long ``--config``/``--root``/``--hookdir``/``--dbpath``/``--cachedir``
+    etc. are rejected outright. Raises ``ValueError`` on anything disallowed.
+    """
+    for a in args:
+        if not a.startswith("-"):
+            continue  # package names / query terms (e.g. "--color auto" value)
+        if a.startswith("--"):
+            base = a.split("=", 1)[0]
+            if base in _QUERY_FORBIDDEN_FLAGS:
+                raise ValueError(f"pacman_run rejects unsafe flag {a!r}")
+            if base not in _QUERY_SAFE_LONG:
+                raise ValueError(f"pacman_run rejects unknown flag {a!r}")
+            continue
+        # Single-dash operation cluster: first char after '-' is the operation.
+        op = a[1] if len(a) > 1 else ""
+        if op == "Q":
+            continue  # all -Q queries are read-only
+        if op == "S":
+            if a not in _QUERY_SAFE_SYNCOPS:
+                raise ValueError(
+                    f"pacman_run rejects mutating sync operation {a!r} "
+                    "(use pacman_install instead)"
+                )
+            continue
+        if op == "F":
+            if a not in _QUERY_SAFE_FILEOPS:
+                raise ValueError(
+                    f"pacman_run rejects unsupported -F operation {a!r}"
+                )
+            continue
+        if op in ("T", "V"):
+            continue
+        raise ValueError(f"pacman_run rejects unknown flag {a!r}")
 
 
 def pacman_install(
@@ -172,6 +245,7 @@ def pacman_install(
             bwrap_argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=_scrub_control_env(os.environ),
         )
         out_bytes, _ = proc.communicate(timeout=timeout)
         output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
@@ -196,9 +270,10 @@ def pacman_run(
 ) -> dict:
     """Run a read-only pacman command (e.g. ``-Q``, ``-Si``, ``-F``).
 
-    No network (``--unshare-net`` via ``--unshare-all``). Returns
-    ``{rc, command, output}``.
+    Only read-only query flags are accepted (H-1). No network
+    (``--unshare-net`` via ``--unshare-all``). Returns ``{rc, command, output}``.
     """
+    _check_query_args(args)
     provisioning_seed(session)
     bwrap_argv = bwrap.provisioning_argv(
         session, args, share_net=False,
@@ -207,6 +282,7 @@ def pacman_run(
         bwrap_argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        env=_scrub_control_env(os.environ),
     )
     out_bytes, _ = proc.communicate(timeout=timeout)
     output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
