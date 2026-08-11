@@ -23,19 +23,38 @@ class FdPlan:
     """File-descriptor plan for a single command invocation.
 
     ``stdin`` / ``stdout`` / ``stderr`` are either ``None`` (use the default
-    from the parent) or a filesystem path that will be opened by the executor.
+    from the parent), a container filesystem path, or a merge marker
+    (``"&1"`` / ``"&2"``).
 
     ``extra_opens`` is a list of ``(fd, path, flags)`` tuples for explicit
     fd-based redirects.
 
     ``shared_read_fd`` is set when multiple processes in a pipeline need to
     read from the same pipe fd (not used in M3 single-command path).
+
+    Host-side redirect application fields (populated by the executor at build
+    time; ``None`` / empty until ``_resolve_fd_plan_host`` runs):
+
+    * ``host_stdin`` / ``host_stdout`` / ``host_stderr``: host filesystem
+      paths to open and pass to ``Popen``.
+    * ``stdout_append`` / ``stderr_append``: open in append mode (``>>``).
+    * ``extra_binds``: additional ``--bind`` argv fragments for bwrap
+      (list of ``[flag, host_path, mnt]`` sublists).
+    * ``cleanup_paths``: host temp files to remove after the invocation.
     """
     stdin: Optional[str] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
     extra_opens: list = field(default_factory=list)
     shared_read_fd: Optional[int] = None
+    # Host-side redirect application (populated by executor at build time)
+    host_stdin: Optional[str] = None
+    host_stdout: Optional[str] = None
+    host_stderr: Optional[str] = None
+    stdout_append: bool = False
+    stderr_append: bool = False
+    extra_binds: list = field(default_factory=list)
+    cleanup_paths: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -95,8 +114,13 @@ class RedirectPlan:
         defaults: FdDefaults,
         *,
         roots: tuple[str, ...] = CONTAINER_ROOTS,
+        base: Optional[str] = None,
     ) -> FdPlan:
         """Resolve this plan against *defaults* and *roots*.
+
+        *base* is an optional container working directory (e.g. ``"/workspace"``).
+        When set, relative redirect targets are resolved against it before
+        validation.  Absolute targets are unaffected.
 
         Returns a :class:`FdPlan`.  Raises :class:`ParseError` if any redirect
         target escapes the container roots.
@@ -115,28 +139,34 @@ class RedirectPlan:
             used_fds.add(fd)
 
             if spec.op in ("<", ">", ">>", "2>", "2>>"):
+                # Resolve relative targets against *base* before validation
+                target = spec.target
+                if base and not os.path.isabs(target):
+                    target = os.path.normpath(os.path.join(base, target))
                 # File-based redirect
-                _validate_target(spec.target, roots=roots)
+                _validate_target(target, roots=roots)
                 if spec.op == "<":
-                    plan.stdin = spec.target
+                    plan.stdin = target
                 elif spec.op in (">", ">>", "2>", "2>>"):
                     if fd == 1:
-                        plan.stdout = spec.target
+                        plan.stdout = target
+                        plan.stdout_append = spec.op == ">>"
                     elif fd == 2:
-                        plan.stderr = spec.target
+                        plan.stderr = target
+                        plan.stderr_append = spec.op == "2>>"
                     else:
                         # M3 doesn't do arbitrary fd-to-file; only 0/1/2
                         raise ParseError(
                             f"redirect of fd {fd} to file is not supported"
                         )
             elif spec.op in ("1>&2", "2>&1"):
-                # Merge redirect
+                # Merge redirect — the merging fd goes to wherever the target
+                # fd ends up.  Do NOT clear the target fd: a prior file redirect
+                # may have set it (e.g. ``cmd > f.txt 2>&1``).
                 if spec.op == "1>&2":
                     plan.stdout = "&2"
-                    plan.stderr = None  # stderr inherits, stdout goes to stderr
                 elif spec.op == "2>&1":
                     plan.stderr = "&1"
-                    plan.stdout = None  # stdout inherits, stderr goes to stdout
             else:
                 raise ParseError(f"unsupported redirect operator {spec.op!r}")
 

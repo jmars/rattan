@@ -46,7 +46,8 @@ stage3 denies `keyctl`, `add_key`, `request_key`, `ptrace` (unless gdb),
 
 It's a containment tool, not a malware sandbox: the host kernel and host tools
 are trusted. Network is only available to `pacman_install` (provisioning).
-Redirects (`cmd > file`) are parsed but not applied to `shell_run` yet.
+Redirects (`>`, `>>`, `<`, `2>`, `2>&1`) are applied, with targets confined to
+`/workspace` and `/tmp`.
 
 Enforceable invariants, each with a test: `docs/security-invariants.md`.
 

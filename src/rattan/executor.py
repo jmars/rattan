@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
-import time
+import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -144,7 +144,10 @@ def build_invocation(
 
     # Build fd plan from redirects
     rp = RedirectPlan(specs=cmd_node.redirects)
-    fd_plan = rp.apply(FdDefaults())
+    fd_plan = rp.apply(FdDefaults(), base=cwd)
+
+    # Resolve container paths to host paths, create /tmp temp files
+    _resolve_fd_plan_host(fd_plan, session)
 
     # Resolve policy
     command_str = " ".join(user_argv)
@@ -153,7 +156,10 @@ def build_invocation(
     # Session host binds (from bind_host_dir)
     from rattan.bind import get_session_binds
     sb = get_session_binds(session.sid)
-    extra_binds = sb.bwrap_bind_argv() if sb.binds else None
+    extra_binds = sb.bwrap_bind_argv() if sb.binds else []
+    # Append any /tmp bind fragments from the fd plan
+    for bind_triple in fd_plan.extra_binds:
+        extra_binds.extend(bind_triple)
     extra_landlock = sb.landlock_extra() if sb.binds else None
 
     # Build bwrap argv
@@ -178,6 +184,110 @@ def build_invocation(
 
 
 # ---------------------------------------------------------------------------
+# Host-side redirect resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_fd_plan_host(fd_plan, session) -> None:
+    """Populate ``host_stdin``/``host_stdout``/``host_stderr`` on *fd_plan*.
+
+    Maps container paths to host filesystem paths:
+    * ``/workspace/*`` → ``<session.workspace>/*`` (host-backed).
+    * ``/tmp/*`` → a fresh host temp file (via ``mkstemp``) plus a ``--bind``
+      entry in ``fd_plan.extra_binds`` so the temp file is visible inside the
+      container at the expected ``/tmp/*`` path.
+
+    The container path has already been validated by
+    :meth:`RedirectPlan.apply`; we only need to determine which root it falls
+    under.
+    """
+    def _host_for(container: str):
+        """Return ``(host_path, None)`` for a container path under a known root."""
+        norm = os.path.normpath(container)
+        # /workspace — mapped to the session workspace dir on the host
+        if norm == "/workspace" or norm.startswith("/workspace" + os.sep):
+            rel = os.path.relpath(norm, "/workspace")
+            return os.path.join(session.workspace, rel)
+        # /tmp — create a host temp file and bind it in
+        if norm == "/tmp" or norm.startswith("/tmp" + os.sep):
+            fd, host_path = tempfile.mkstemp(prefix="rattan-redir-")
+            os.close(fd)
+            fd_plan.cleanup_paths.append(host_path)
+            # bind host file -> container /tmp/<rel>
+            rel = os.path.relpath(norm, "/tmp")
+            fd_plan.extra_binds.append(["--bind", host_path, os.path.join("/tmp", rel)])
+            return host_path
+        return None  # should not happen (validated already)
+
+    if fd_plan.stdin:
+        fd_plan.host_stdin = _host_for(fd_plan.stdin)
+    if fd_plan.stdout and not fd_plan.stdout.startswith("&"):
+        fd_plan.host_stdout = _host_for(fd_plan.stdout)
+    if fd_plan.stderr and not fd_plan.stderr.startswith("&"):
+        fd_plan.host_stderr = _host_for(fd_plan.stderr)
+
+
+def _spawn_kwargs(fd_plan) -> tuple[dict, list]:
+    """Return ``(Popen kwargs, list of opened file objects to close)``.
+
+    The returned dict contains ``stdin``, ``stdout``, ``stderr`` keys (only the
+    non-default ones; ``stdin`` is omitted when no redirect, ``stdout`` defaults
+    to ``subprocess.PIPE``, ``stderr`` defaults to ``subprocess.STDOUT``).
+
+    Merge redirects (``1>&2``, ``2>&1``) are resolved against any file-target
+    redirect that is already set for the other fd.
+    """
+    kwargs: dict = {}
+    opened: list = []
+
+    def _makedirs(path):
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+
+    # stdin
+    if fd_plan.host_stdin:
+        kwargs["stdin"] = open(fd_plan.host_stdin, "rb")
+        opened.append(kwargs["stdin"])
+
+    # stdout
+    if fd_plan.host_stdout:
+        _makedirs(fd_plan.host_stdout)
+        kwargs["stdout"] = open(
+            fd_plan.host_stdout, "ab" if fd_plan.stdout_append else "wb"
+        )
+        opened.append(kwargs["stdout"])
+    else:
+        kwargs["stdout"] = subprocess.PIPE
+
+    # stderr
+    if fd_plan.stderr == "&1":
+        # 2>&1 — stderr goes wherever stdout goes
+        kwargs["stderr"] = kwargs["stdout"] if fd_plan.host_stdout else subprocess.STDOUT
+    elif fd_plan.stdout == "&2":
+        # 1>&2 — stdout goes wherever stderr goes
+        if fd_plan.host_stderr:
+            _makedirs(fd_plan.host_stderr)
+            f = open(fd_plan.host_stderr, "ab" if fd_plan.stderr_append else "wb")
+            opened.append(f)
+            kwargs["stdout"] = f
+            kwargs["stderr"] = f
+        else:
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.STDOUT
+    elif fd_plan.host_stderr:
+        _makedirs(fd_plan.host_stderr)
+        kwargs["stderr"] = open(
+            fd_plan.host_stderr, "ab" if fd_plan.stderr_append else "wb"
+        )
+        opened.append(kwargs["stderr"])
+    else:
+        kwargs["stderr"] = subprocess.STDOUT
+
+    return kwargs, opened
+
+
+# ---------------------------------------------------------------------------
 # Run command
 # ---------------------------------------------------------------------------
 
@@ -188,14 +298,36 @@ def run_command(inv: Invocation) -> dict:
     Returns a dict with keys ``command``, ``output``, ``rc``.
     On timeout the process group is killed with ``SIGKILL``.
     """
-    started = time.monotonic()
-    proc = subprocess.Popen(
-        inv.bwrap_argv,
-        env={**_scrub_control_env(os.environ), **inv.env},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    try:
+        spawn_kwargs, opened = _spawn_kwargs(inv.fd_plan)
+    except (OSError, IOError) as e:
+        # Clean up any paths registered so far
+        for p in inv.fd_plan.cleanup_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
+
+    try:
+        proc = subprocess.Popen(
+            inv.bwrap_argv,
+            env={**_scrub_control_env(os.environ), **inv.env},
+            start_new_session=True,
+            **spawn_kwargs,
+        )
+    except (OSError, IOError) as e:
+        for f in opened:
+            try:
+                f.close()
+            except OSError:
+                pass
+        for p in inv.fd_plan.cleanup_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
 
     try:
         out_bytes, _ = proc.communicate(timeout=inv.timeout)
@@ -212,6 +344,19 @@ def run_command(inv: Invocation) -> dict:
             proc.kill()
             out_bytes, _ = proc.communicate()
         rc = -1  # signal timeout
+    finally:
+        # Close any opened fd objects
+        for f in opened:
+            try:
+                f.close()
+            except OSError:
+                pass
+        # Remove temp files created for /tmp redirects
+        for p in inv.fd_plan.cleanup_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
     output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
 
@@ -257,20 +402,42 @@ def execute_pipeline(
     inv0 = build_invocation(cmd0, session, env_store, cwd, timeout)
     inv1 = build_invocation(cmd1, session, env_store, cwd, timeout)
 
+    # Build spawn kwargs for both commands
+    try:
+        kw0, opened0 = _spawn_kwargs(inv0.fd_plan)
+        kw1, opened1 = _spawn_kwargs(inv1.fd_plan)
+    except (OSError, IOError) as e:
+        for plan in (inv0.fd_plan, inv1.fd_plan):
+            for p in plan.cleanup_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        return {
+            "command": command_str,
+            "output": f"redirect error: {e}",
+            "rc": 1,
+        }
+
+    all_opened = opened0 + opened1
+    all_cleanup = inv0.fd_plan.cleanup_paths + inv1.fd_plan.cleanup_paths
+
+    # cmd0: stdout must go to the pipe, keep stdin/stderr redirects
+    kw0["stdout"] = subprocess.PIPE
     proc0 = subprocess.Popen(
         inv0.bwrap_argv,
         env={**_scrub_control_env(os.environ), **inv0.env},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         start_new_session=True,
+        **kw0,
     )
+
+    # cmd1: stdin comes from cmd0's stdout, keep stdout/stderr redirects
+    kw1["stdin"] = proc0.stdout
     proc1 = subprocess.Popen(
         inv1.bwrap_argv,
         env={**_scrub_control_env(os.environ), **inv1.env},
-        stdin=proc0.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         start_new_session=True,
+        **kw1,
     )
     if proc0.stdout:
         proc0.stdout.close()
@@ -296,6 +463,17 @@ def execute_pipeline(
             proc1.kill()
             out_bytes, _ = proc1.communicate()
         rc = -1
+    finally:
+        for f in all_opened:
+            try:
+                f.close()
+            except OSError:
+                pass
+        for p in all_cleanup:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
     output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
 
