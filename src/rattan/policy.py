@@ -52,6 +52,10 @@ class ResolvedPolicy:
     landlock_spec: str
     rlimits: str
     allow_ptrace: bool
+    # Extra pledge tokens (beyond `promises`) passed to stage3 via
+    # RATTAN_EXTRA_PROMISES so tools like git (sendfd) / gcc (prot_exec) get the
+    # pledges they need without widening the shared baseline.
+    extra_promises: str = ""
 
     @property
     def full_landlock_spec(self) -> str:
@@ -160,15 +164,19 @@ def resolve(command: str, mode: str = "agent") -> ResolvedPolicy:
         landlock_spec=cp.extra_landlock,
         rlimits=cp.rlimits,
         allow_ptrace=cp.allow_ptrace,
+        extra_promises=cp.extra_promises,
     )
 
 
 def stage3_env(resolved: ResolvedPolicy) -> dict[str, str]:
     """Build the extra environment variables that stage3 reads.
 
-    ``RATTAN_EXTRA_PROMISES``, ``RATTAN_ALLOW_PTRACE``, ``RATTAN_RLIMITS``.
+    ``RATTAN_EXTRA_PROMISES`` (extra pledge tokens merged by stage3),
+    ``RATTAN_ALLOW_PTRACE``, ``RATTAN_RLIMITS``.
     """
     env: dict[str, str] = {}
+    if resolved.extra_promises:
+        env["RATTAN_EXTRA_PROMISES"] = resolved.extra_promises
     if resolved.allow_ptrace:
         env["RATTAN_ALLOW_PTRACE"] = "1"
     if resolved.rlimits:
