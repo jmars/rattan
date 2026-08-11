@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rattan"
+version = "0.1.0"
+description = "MCP server providing a shell sandbox (Arch rootfs + seccomp + userns + bubblewrap + Landlock + overlayfs)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0,<2.0",
+]
+
+[project.scripts]
+rattan = "rattan.server:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
