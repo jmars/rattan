@@ -10,3 +10,14 @@ dist/
 rootfs/
 sessions/
 layers/
+# Built binaries (sources at src/rattan/stage3.c and tests/probes/*.c)
+bin/
+tests/probes/keytest
+tests/probes/ptracetest
+tests/probes/mounttest
+tests/probes/unsharetest
+tests/probes/reverse_order_probe
+# cosmocc build intermediates (fat APE + multi-arch artifacts)
+*.ape
+*.com.dbg
+*.aarch64.elf
