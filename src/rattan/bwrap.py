@@ -16,10 +16,17 @@ def agent_argv(
     resolved_policy: ResolvedPolicy,
     user_argv: list[str],
     cwd: str = "/workspace",
+    extra_binds: list[str] | None = None,
+    extra_landlock: list[str] | None = None,
 ) -> list[str]:
     """Build the full ``bwrap`` argv for an agent-mode command.
 
     The resulting argv is passed directly to ``subprocess.Popen``.
+
+    *extra_binds* is an optional flat list of ``--bind <host> <mnt>`` /
+    ``--ro-bind <host> <mnt>`` argv fragments (from ``bind_host_dir``).
+    *extra_landlock* is an optional list of ``path:perms`` entries appended to
+    the LANDLOCK_SPEC (so a bound mount point is visible to the command).
     """
     stage3 = config.stage3_path()
 
@@ -36,6 +43,11 @@ def agent_argv(
         "--proc", "/proc",
         "--dev", "/dev",
         "--tmpfs", "/tmp",
+    ]
+    # Session host binds (from bind_host_dir)
+    if extra_binds:
+        argv.extend(extra_binds)
+    argv += [
         # Stage3 as /init (read-only)
         "--ro-bind", stage3, "/init",
         # Working directory
@@ -45,10 +57,11 @@ def agent_argv(
         "--",
         "/init",
         resolved_policy.promises,
-        resolved_policy.full_landlock_spec,
-        "--",
-        *user_argv,
     ]
+    landlock = resolved_policy.full_landlock_spec
+    if extra_landlock:
+        landlock = landlock + ";" + ";".join(extra_landlock)
+    argv += [landlock, "--", *user_argv]
     return argv
 
 

@@ -22,8 +22,11 @@ AGENT_BASELINE_PROMISES = (
 )
 
 # Landlock paths that are always unveiled in agent mode.
+# `/:r` reveals the root directory so `ls /` works; specific subdirs are then
+# narrowed (e.g. /workspace:rwc, /usr:rx). Landlock unions rules per-path so
+# the more specific entries take effect for their subtrees.
 AGENT_BASELINE_LANDLOCK = (
-    "/workspace:rwc;/tmp:rwc;/usr:rx;/bin:rx;/lib:rx;/lib64:rx;"
+    "/:r;/workspace:rwc;/tmp:rwc;/usr:rx;/bin:rx;/lib:rx;/lib64:rx;"
     "/proc:r;/etc:r;/dev:rwc"
 )
 

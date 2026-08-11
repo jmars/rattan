@@ -57,7 +57,7 @@ bootstrap-rootfs:
 	bash bin/bootstrap-rootfs.sh
 
 verify:
-	PYTHONPATH=$(PYTHONPATH) $(PY) -m rattan --probe
+	bash bin/verify.sh
 
 test: stage3 probes
 	$(PY) -m unittest discover -s tests -v

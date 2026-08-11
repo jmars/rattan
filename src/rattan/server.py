@@ -24,7 +24,6 @@ from rattan.executor import InvocationError, EmptyInvocation, execute_program
 from rattan.overlay import provision
 from rattan.parser import parse, ParseError
 
-
 # ---------------------------------------------------------------------------
 # Startup gate
 # ---------------------------------------------------------------------------
@@ -331,6 +330,128 @@ def _build_tools(fastmcp: FastMCP):
         timeout: float = 60,
     ) -> dict:
         return pacman.pacman_run(sessions.current(), args, timeout=timeout)
+
+    # ---- Background jobs -------------------------------------------------
+
+    @fastmcp.tool(
+        description=(
+            "Start a command as a detached background job inside the sandbox. "
+            "Returns {job_id, pid, status}. Poll with shell_job_status, collect "
+            "output with shell_job_output, wait with shell_job_wait."
+        )
+    )
+    def shell_job_start(
+        command: str,
+        cwd: str = "/workspace",
+        timeout: int = 300,
+    ) -> dict:
+        from rattan import bgdriver, jobs, layers
+
+        s = sessions.current()
+        if s is None:
+            s = sessions.get_or_create()
+        provision(s)
+        log_dir = os.path.join(s.root, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"job-{int(time.time() * 1000)}.log")
+        try:
+            popen, log_fh = bgdriver.launch_background_job(
+                command, s, cwd, timeout, log_path,
+            )
+        except (ValueError, parser.ParseError, InvocationError) as e:
+            return {"error": str(e)}
+        job_id = jobs.start_job(command, cwd, popen, log_path, timeout=timeout)
+        return {
+            "job_id": job_id,
+            "pid": popen.pid,
+            "status": "running",
+            "log_path": log_path,
+        }
+
+    @fastmcp.tool(description="Report the status of a background job (no polling).")
+    def shell_job_status(job_id: int) -> dict:
+        from rattan import jobs
+        return jobs.job_status(job_id)
+
+    @fastmcp.tool(
+        description=(
+            "Wait for a background job to finish (bounded ~55s). Returns final "
+            "status + exit code."
+        )
+    )
+    def shell_job_wait(job_id: int, wait_seconds: float = 30.0) -> dict:
+        from rattan import jobs
+        return jobs.job_wait(job_id, wait_seconds)
+
+    @fastmcp.tool(
+        description="Return the (tail of the) output log for a background job."
+    )
+    def shell_job_output(job_id: int, tail_bytes: int = 8192) -> dict:
+        from rattan import jobs
+        return jobs.job_output(job_id, tail_bytes)
+
+    @fastmcp.tool(description="Kill a running background job.")
+    def shell_job_kill(job_id: int) -> dict:
+        from rattan import jobs
+        return jobs.job_kill(job_id)
+
+    @fastmcp.tool(description="List all background jobs.")
+    def shell_job_list() -> list[dict]:
+        from rattan import jobs
+        return jobs.list_jobs()
+
+    # ---- Host dir binding -------------------------------------------------
+
+    @fastmcp.tool(
+        description=(
+            "Bind a host directory into the container for subsequent commands "
+            "at mount_point (a container path). mode='ro' or 'rw'. Rejects "
+            "forbidden host paths ($HOME, ~/.config, ~/.local, ~/.cache, /etc, "
+            "/proc, /sys) and non-directories."
+        )
+    )
+    def bind_host_dir(
+        host_path: str,
+        mount_point: str,
+        mode: str = "ro",
+    ) -> dict:
+        from rattan import bind
+
+        s = sessions.current()
+        if s is None:
+            s = sessions.get_or_create()
+        try:
+            sb = bind.get_session_binds(s.sid)
+            b = sb.add(host_path, mount_point, mode)
+        except ValueError as e:
+            return {"error": str(e)}
+        return {
+            "status": "bound",
+            "host_path": b.host_path,
+            "mount_point": b.mount_point,
+            "mode": b.mode,
+            "session_id": s.sid,
+        }
+
+    # ---- shell_list ------------------------------------------------------
+
+    @fastmcp.tool(
+        description=(
+            "List the commands available inside the container (reads /usr/bin "
+            "inventory + the policy table)."
+        )
+    )
+    def shell_list() -> list[str]:
+        from rattan import policy
+        names = sorted(policy.POLICY_TABLE.keys())
+        try:
+            r = pacman.pacman_run(sessions.current(), ["-Qq"], timeout=30)
+            if r["rc"] == 0:
+                installed = [ln.strip() for ln in r["output"].splitlines() if ln.strip()]
+                names.extend(installed[:200])
+        except Exception:
+            pass
+        return sorted(set(names))
 
 
 # ---------------------------------------------------------------------------
