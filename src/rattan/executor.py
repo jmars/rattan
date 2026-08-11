@@ -94,6 +94,28 @@ def _copy_env_with_assignments(
     return new_env
 
 
+# Env var prefixes that the agent must NEVER control. stage3 reads RATTAN_* via
+# getenv() to decide seccomp/pledge/rlimits — a user `VAR=val cmd` assignment
+# could set `RATTAN_ALLOW_PTRACE=1` and disable seccomp entirely (invariant #10
+# bypass). LD_*/DYLD_*/PYTHON* are classic loader/execution hijack vectors.
+_CONTROL_ENV_PREFIXES = (
+    "RATTAN_",
+    "LD_",
+    "DYLD_",
+    "PYTHON",
+    "PERL5OPT",
+    "PERLLIB",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+)
+
+
+def _scrub_control_env(env: dict[str, str]) -> dict[str, str]:
+    """Return *env* with every control-prefixed key removed."""
+    return {k: v for k, v in env.items() if not k.startswith(_CONTROL_ENV_PREFIXES)}
+
+
 def build_invocation(
     cmd_node: CommandNode,
     session: Session,
@@ -140,8 +162,9 @@ def build_invocation(
         extra_binds=extra_binds, extra_landlock=extra_landlock,
     )
 
-    # Build env for subprocess (stage3 env vars)
-    sub_env = dict(cmd_env)
+    # Build env for subprocess (stage3 env vars). Scrub control-prefixed vars
+    # so the agent can never set RATTAN_* / LD_* etc (invariant #10, C-1).
+    sub_env = _scrub_control_env(cmd_env)
     sub_env.update(stage3_env(resolved))
 
     return Invocation(
@@ -168,7 +191,7 @@ def run_command(inv: Invocation) -> dict:
     started = time.monotonic()
     proc = subprocess.Popen(
         inv.bwrap_argv,
-        env={**os.environ, **inv.env},
+        env={**_scrub_control_env(os.environ), **inv.env},
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -236,14 +259,14 @@ def execute_pipeline(
 
     proc0 = subprocess.Popen(
         inv0.bwrap_argv,
-        env={**os.environ, **inv0.env},
+        env={**_scrub_control_env(os.environ), **inv0.env},
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
     proc1 = subprocess.Popen(
         inv1.bwrap_argv,
-        env={**os.environ, **inv1.env},
+        env={**_scrub_control_env(os.environ), **inv1.env},
         stdin=proc0.stdout,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

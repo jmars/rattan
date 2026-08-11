@@ -98,6 +98,12 @@ def validate_base_manifest():
         raise RuntimeError(msg)
 
 
+# Marker file inside a session root recording that the provisioning seed has
+# run for that session's *current* upperdir. layers._wipe_upper removes it, so a
+# fresh upper (after commit/discard/reset) is re-seeded on the next pacman call.
+SEED_MARKER = ".rattan-seeded"
+
+
 # Startup gate: the server refuses to start if any of these is absent.
 REQUIRED_CAPABILITIES = [
     "kernel_version",
