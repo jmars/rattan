@@ -54,7 +54,7 @@ $(PROBE_DIR)/reverse_order_probe: $(PROBE_DIR)/reverse_order_probe.c
 probes: $(SYSCALL_PROBES:%=$(PROBE_DIR)/%) $(PROBE_DIR)/reverse_order_probe
 
 bootstrap-rootfs:
-	@echo "bootstrap-rootfs not implemented in M0"
+	bash bin/bootstrap-rootfs.sh
 
 verify:
 	PYTHONPATH=$(PYTHONPATH) $(PY) -m rattan --probe

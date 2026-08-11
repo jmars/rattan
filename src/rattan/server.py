@@ -12,7 +12,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from rattan import capabilities
+from rattan import capabilities, config
 
 
 def _gate_or_raise(table):
@@ -57,6 +57,10 @@ def main(argv=None):
 
     table = capabilities.get_capabilities()
     _gate_or_raise(table)
+
+    # Gate on base rootfs integrity: refuse to start if the immutable base has
+    # drifted (or was never bootstrapped).
+    config.validate_base_manifest()
 
     fastmcp = FastMCP("rattan")
     _build_tool(fastmcp)
