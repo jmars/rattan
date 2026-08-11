@@ -113,10 +113,10 @@ Outermost → innermost. **No privileged window where user code runs.**
 │   --unshare-user --unshare-pid --unshare-ipc --unshare-uts      │
 │   --unshare-net           ← AGENT MODE: no network               │
 │   --uid 1000 --gid 1000   ← agent mode; (provisioning uses 0/0) │
-│   --ro-bind <base-rootfs> /        ← immutable lower             │
-│   --overlay <lower-stack> <upper> <work> /  ← or via stage2      │
-│   --bind <validated-host-workdir> /workspace                    │
-│   --dev /dev --proc /proc --tmpfs /tmp                          │
+│   --overlay-src <base-rootfs>        ← immutable lower[0]       │
+│   --overlay-src <layer-1> ...        ← committed layers (bottom)│
+│   --overlay <upper> <work> /         ← writable overlay at /    │
+│   --proc /proc --tmpfs /tmp --dev /dev                          │
 │   --ro-bind <stage3-binary> /init                                │
 │   -- /init PROMISES LANDLOCK_SPEC -- <user-cmd> <args>           │
 │                                                                  │
@@ -150,16 +150,25 @@ Outermost → innermost. **No privileged window where user code runs.**
                   └────────────────────┘     landlock, seccomp
 ```
 
+> **bwrap overlay mechanics (validated in M3 spike):** the base rootfs and each
+> committed layer are declared as overlay *lowers* via repeated
+> `--overlay-src <path>`; the session's writable upperdir is mounted at `/` with
+> `--overlay <upper> <work> /`. The base is **not** a separate `--ro-bind /`
+> (that would make `/` read-only and the overlay could not mount). `bin/stage3`
+> is bound read-only at `/init` (bwrap creates the file mountpoint on the
+> overlay root).
+
 ### How the Arch env becomes visible
 
 bwrap builds the visible filesystem before exec'ing `/init`:
 
 - `/` = overlay(base + committed-layers, upperdir, workdir) — pacman-installed
-  files appear here
+  files appear here; writes land in the session upperdir
 - `/proc`, `/dev`, `/dev/pts` (for tty), `/sys` (read-only) — bound by bwrap
 - `/tmp` = tmpfs inside the container (private per command)
-- `/workspace` = bind from validated host path (the only host path the agent
-  can read/write)
+- `/workspace` = a directory inside the session upperdir (seeded empty at session
+  creation); part of the overlay, so writes there are captured by commit. Explicit
+  host-dir binds arrive in M5 (`bind_host_dir`).
 - `/etc/resolv.conf` = **not** bound in agent mode (network is unshared anyway);
   bound in provisioning mode
 

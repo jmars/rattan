@@ -7,6 +7,37 @@ import subprocess
 import tempfile
 
 
+def repo_root():
+    """Absolute path to the repository root (3 levels up from this file).
+
+    When the package is installed site-wide ``bin/stage3`` won't exist there,
+    but for the dev/CI workflow this is the canonical location.
+    """
+    return os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+
+
+def stage3_path():
+    """Absolute path to the ``bin/stage3`` inner binary."""
+    return os.path.join(repo_root(), "bin", "stage3")
+
+
+def layers_dir():
+    """Path to the committed-layer store."""
+    return os.path.join(data_dir(), "layers")
+
+
+def sessions_dir():
+    """Path to the active-session store."""
+    return os.path.join(data_dir(), "sessions")
+
+
+def index_lock_path():
+    """Path to the ``flock`` lock file guarding ``layers/index.json``."""
+    return os.path.join(layers_dir(), "index.lock")
+
+
 def data_dir():
     """Root data directory for sessions, layers and the rootfs.
 
