@@ -10,8 +10,10 @@ dist/
 rootfs/
 sessions/
 layers/
-# Built binaries (sources at src/rattan/stage3.c and tests/probes/*.c)
-bin/
+# Built binaries (sources at src/rattan/stage3.c and tests/probes/*.c).
+# Note: bin/ is NOT ignored as a whole — bin/bootstrap-rootfs.sh is committed
+# source; only the built stage3 binary is ignored.
+bin/stage3
 tests/probes/keytest
 tests/probes/ptracetest
 tests/probes/mounttest
