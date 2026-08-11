@@ -99,9 +99,23 @@ class TestBwrapAgentArgv(unittest.TestCase):
         self.assertNotIn("--share-net", argv)
         self.assertIn("--unshare-all", argv)
 
-    def test_provisioning_raises(self):
-        with self.assertRaises(NotImplementedError):
-            bwrap.provisioning_argv()
+    def test_provisioning_argv_shape(self):
+        """M4 provisioning argv: share-net, uid 0/0, no stage3, pacman."""
+        argv = bwrap.provisioning_argv(self.session, ["-Q"], share_net=True)
+        self.assertIn("--share-net", argv)
+        self.assertIn("--uid", argv)
+        self.assertIn("0", argv)
+        self.assertNotIn("/init", argv)          # no stage3
+        self.assertEqual(argv[-1], "-Q")         # pacman arg is last
+        self.assertIn("/usr/bin/pacman", argv)
+        # read-only pacman_run variant has no share-net
+        argv2 = bwrap.provisioning_argv(self.session, ["-Q"], share_net=False)
+        self.assertNotIn("--share-net", argv2)
+
+    def test_provisioning_no_stage3(self):
+        """Provisioning mode must not mount stage3 as /init."""
+        argv = bwrap.provisioning_argv(self.session, ["-Q"], share_net=False)
+        self.assertNotIn("/init", argv)
 
     def test_baseline_promises_match_stage3(self):
         """AGENT_BASELINE_PROMISES must exactly match stage3.c BASELINE_PROMISES."""

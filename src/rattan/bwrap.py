@@ -52,9 +52,48 @@ def agent_argv(
     return argv
 
 
-def provisioning_argv() -> list[str]:
-    """Build the bwrap argv for provisioning mode.
+def provisioning_argv(
+    session: Session,
+    pacman_args: list[str],
+    *,
+    share_net: bool = True,
+    mirror_tmpfile: str | None = None,
+) -> list[str]:
+    """Build the ``bwrap`` argv for provisioning mode (pacman).
 
-    Not implemented in M3 — raises ``NotImplementedError``.
+    Pacman runs **directly** under bwrap (root-in-userns, no stage3). Isolation
+    is userns + bwrap + overlay: there are no host bind mounts beyond the
+    session upperdir and resolv.conf, so pacman cannot reach the host
+    filesystem. Landlock/seccomp are skipped because Landlock's deny-by-default
+    model cannot express "restrict /workspace but leave / open" for pacman's
+    writes to /usr, /var/lib/pacman, /etc.
+
+    - *share_net*: True → ``--share-net`` (networked install). False → omit it
+      (read-only ``pacman_run`` stays offline via ``--unshare-all``).
+    - *mirror_tmpfile*: when set, bind it over the container's
+      ``/etc/pacman.d/mirrorlist`` for this call only.
     """
-    raise NotImplementedError("provisioning mode arrives in M4")
+    argv = [
+        "bwrap",
+        "--unshare-all",
+    ]
+    if share_net:
+        argv.append("--share-net")
+    argv += [
+        "--uid", "0",
+        "--gid", "0",
+        # Overlay lower dirs (base + committed layers)
+        *overlay.lower_argv(session),
+        # Overlay mount at /
+        *overlay.overlay_argv(session, "/"),
+        # Runtime mounts
+        "--proc", "/proc",
+        "--dev", "/dev",  # provides /dev/urandom (needed by pacman-key / gpg)
+        "--tmpfs", "/tmp",
+        # DNS: bind the host's resolv.conf (the base stub doesn't resolve)
+        "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
+    ]
+    if mirror_tmpfile:
+        argv += ["--bind", mirror_tmpfile, "/etc/pacman.d/mirrorlist"]
+    argv += ["--", "/usr/bin/pacman", *pacman_args]
+    return argv
