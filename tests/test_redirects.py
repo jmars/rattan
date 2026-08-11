@@ -139,12 +139,28 @@ class TestRedirectApplication(unittest.TestCase):
     def setUp(self):
         from rattan import layers
         self.session = layers.create_session()
+        # Tracks /tmp redirect temp files created by _build so they're removed
+        # in tearDown (unit tests build but don't run, so run_command cleanup
+        # never fires).
+        self._cleanup_paths: list[str] = []
 
     def tearDown(self):
         from rattan import layers
         layers.destroy(self.session)
+        for p in self._cleanup_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
     def _build(self, command: str, cwd: str = "/workspace") -> FdPlan:
+        plan = self._build_impl(command, cwd)
+        # /tmp redirects created a host temp file registered for cleanup; since
+        # we don't run the command here, unlink it in tearDown instead.
+        self._cleanup_paths.extend(plan.cleanup_paths)
+        return plan
+
+    def _build_impl(self, command: str, cwd: str = "/workspace") -> FdPlan:
         """Parse *command* and return the fd_plan from build_invocation."""
         from rattan.executor import build_invocation
         from rattan.parser import parse
@@ -395,6 +411,93 @@ class TestRedirectApplication(unittest.TestCase):
         from rattan.parser import ParseError as PE
         with self.assertRaises(PE):
             self._build("echo hi > ../etc/passwd", cwd="/workspace")
+
+
+class TestRedirectUnderBind(unittest.TestCase):
+    """Redirect targets under a bind_host_dir mount point.
+
+    A redirect into a bound dir must resolve to the bind's HOST path (not the
+    overlay upper). Write redirects into a ``ro`` bind must be DENIED — the
+    host-side parent could otherwise open the host file and bypass ``--ro-bind``.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.mkdtemp(prefix="rattan-test-bind-")
+        cls._patches = [
+            mock.patch.dict(os.environ, {"RATTAN_DATA_DIR": cls._tmp}),
+        ]
+        for p in cls._patches:
+            p.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in reversed(cls._patches):
+            p.stop()
+        import shutil
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def setUp(self):
+        from rattan import layers
+        self.session = layers.create_session()
+        self.hostdir = tempfile.mkdtemp(prefix="rattan-bind-host-")
+
+    def tearDown(self):
+        from rattan import layers
+        layers.destroy(self.session)
+        import shutil
+        shutil.rmtree(self.hostdir, ignore_errors=True)
+
+    def _build(self, command: str, mode: str = "rw",
+               mount: str = "/workspace/proj"):
+        from rattan import bind
+        from rattan.executor import build_invocation
+        from rattan.parser import parse
+        bind.get_session_binds(self.session.sid).add(self.hostdir, mount, mode)
+        program = parse(command)
+        cmd_node = program.andors[0].pipelines[0].commands[0]
+        env_store = {"HOME": "/workspace", "PATH": "/usr/bin:/bin", "USER": "test"}
+        inv = build_invocation(cmd_node, self.session, env_store, "/workspace", 30)
+        return inv.fd_plan
+
+    def test_rw_bind_write_redirect_resolves_to_bind_host(self):
+        plan = self._build("echo hi > /workspace/proj/out.txt", mode="rw")
+        self.assertEqual(plan.host_stdout, os.path.join(self.hostdir, "out.txt"))
+
+    def test_rw_bind_write_subdir(self):
+        plan = self._build("echo hi > /workspace/proj/sub/deep/f.txt", mode="rw")
+        self.assertEqual(
+            plan.host_stdout, os.path.join(self.hostdir, "sub", "deep", "f.txt")
+        )
+
+    def test_rw_bind_append(self):
+        plan = self._build("echo hi >> /workspace/proj/out.txt", mode="rw")
+        self.assertEqual(plan.host_stdout, os.path.join(self.hostdir, "out.txt"))
+        self.assertTrue(plan.stdout_append)
+
+    def test_ro_bind_write_redirect_denied(self):
+        from rattan.executor import InvocationError
+        with self.assertRaises(InvocationError):
+            self._build("echo hi > /workspace/proj/out.txt", mode="ro")
+
+    def test_ro_bind_append_redirect_denied(self):
+        from rattan.executor import InvocationError
+        with self.assertRaises(InvocationError):
+            self._build("echo hi >> /workspace/proj/out.txt", mode="ro")
+
+    def test_ro_bind_stderr_redirect_denied(self):
+        from rattan.executor import InvocationError
+        with self.assertRaises(InvocationError):
+            self._build("sh -c true 2> /workspace/proj/err.txt", mode="ro")
+
+    def test_ro_bind_read_redirect_allowed(self):
+        plan = self._build("cat < /workspace/proj/in.txt", mode="ro")
+        self.assertEqual(plan.host_stdin, os.path.join(self.hostdir, "in.txt"))
+
+    def test_ro_bind_2gt1_write_denied(self):
+        from rattan.executor import InvocationError
+        with self.assertRaises(InvocationError):
+            self._build("echo hi > /workspace/proj/out.txt 2>&1", mode="ro")
 
 
 if __name__ == "__main__":

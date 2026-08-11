@@ -191,19 +191,46 @@ def build_invocation(
 def _resolve_fd_plan_host(fd_plan, session) -> None:
     """Populate ``host_stdin``/``host_stdout``/``host_stderr`` on *fd_plan*.
 
-    Maps container paths to host filesystem paths:
-    * ``/workspace/*`` → ``<session.workspace>/*`` (host-backed).
+    Maps a container redirect target to a host filesystem path:
+    * a bind mount point (``bind_host_dir``) → ``<host_path>/<rel>``. For a
+      **write** redirect into a ``ro`` bind this is denied (``InvocationError``):
+      the fd would be opened by the host-side parent, which can write the host
+      dir directly and would otherwise bypass the ``--ro-bind``. Read redirects
+      into ``ro`` binds are allowed.
+    * ``/workspace/*`` → ``<session.workspace>/*`` (host-backed overlay upper).
     * ``/tmp/*`` → a fresh host temp file (via ``mkstemp``) plus a ``--bind``
       entry in ``fd_plan.extra_binds`` so the temp file is visible inside the
       container at the expected ``/tmp/*`` path.
 
-    The container path has already been validated by
-    :meth:`RedirectPlan.apply`; we only need to determine which root it falls
-    under.
+    The container path has already been validated by :meth:`RedirectPlan.apply`;
+    we only need to determine which root it falls under. Bind mounts shadow
+    ``/workspace``/``/tmp``, so they are checked first.
     """
-    def _host_for(container: str):
-        """Return ``(host_path, None)`` for a container path under a known root."""
+    from rattan.bind import get_session_binds
+    binds = get_session_binds(session.sid).binds
+
+    def _bind_host(container: str):
+        """Return ``(host_path, mode)`` if *container* is under a bind mount."""
         norm = os.path.normpath(container)
+        for b in binds:
+            mp = os.path.normpath(b.mount_point)
+            if norm == mp or norm.startswith(mp + os.sep):
+                rel = os.path.relpath(norm, mp)
+                return os.path.join(b.host_path, rel), b.mode
+        return None
+
+    def _host_for(container: str, write: bool):
+        """Resolve *container* to a host path; raise if *write* into a ro bind."""
+        norm = os.path.normpath(container)
+        bt = _bind_host(norm)
+        if bt is not None:
+            host, mode = bt
+            if write and mode == "ro":
+                raise InvocationError(
+                    f"cannot write redirect target {container!r}: "
+                    f"bound read-only ({host!r})"
+                )
+            return host
         # /workspace — mapped to the session workspace dir on the host
         if norm == "/workspace" or norm.startswith("/workspace" + os.sep):
             rel = os.path.relpath(norm, "/workspace")
@@ -220,11 +247,11 @@ def _resolve_fd_plan_host(fd_plan, session) -> None:
         return None  # should not happen (validated already)
 
     if fd_plan.stdin:
-        fd_plan.host_stdin = _host_for(fd_plan.stdin)
+        fd_plan.host_stdin = _host_for(fd_plan.stdin, write=False)
     if fd_plan.stdout and not fd_plan.stdout.startswith("&"):
-        fd_plan.host_stdout = _host_for(fd_plan.stdout)
+        fd_plan.host_stdout = _host_for(fd_plan.stdout, write=True)
     if fd_plan.stderr and not fd_plan.stderr.startswith("&"):
-        fd_plan.host_stderr = _host_for(fd_plan.stderr)
+        fd_plan.host_stderr = _host_for(fd_plan.stderr, write=True)
 
 
 def _spawn_kwargs(fd_plan) -> tuple[dict, list]:
