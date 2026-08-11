@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from unittest import mock
 
 from rattan import bwrap, layers, overlay, policy
 

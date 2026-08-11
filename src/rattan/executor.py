@@ -60,12 +60,12 @@ class EmptyInvocation(Exception):
 
 
 def _validate_cwd(cwd: str):
-    """Ensure *cwd* is inside /workspace."""
-    norm = os.path.normpath(cwd)
-    if not (norm == "/workspace" or norm.startswith("/workspace/")):
-        raise InvocationError(
-            f"cwd must be under /workspace, got {cwd!r}"
-        )
+    """Ensure *cwd* is inside /workspace (or /tmp)."""
+    from rattan.contain import validate_cwd as _vc
+    try:
+        _vc(cwd)
+    except ValueError as e:
+        raise InvocationError(str(e))
 
 
 def _resolve_argv(
@@ -128,8 +128,17 @@ def build_invocation(
     command_str = " ".join(user_argv)
     resolved = resolve(command_str, mode="agent")
 
+    # Session host binds (from bind_host_dir)
+    from rattan.bind import get_session_binds
+    sb = get_session_binds(session.sid)
+    extra_binds = sb.bwrap_bind_argv() if sb.binds else None
+    extra_landlock = sb.landlock_extra() if sb.binds else None
+
     # Build bwrap argv
-    bwrap_argv = bwrap.agent_argv(session, resolved, user_argv, cwd=cwd)
+    bwrap_argv = bwrap.agent_argv(
+        session, resolved, user_argv, cwd=cwd,
+        extra_binds=extra_binds, extra_landlock=extra_landlock,
+    )
 
     # Build env for subprocess (stage3 env vars)
     sub_env = dict(cmd_env)
