@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from rattan import bind, config, executor, layers, pacman, parser
+from rattan import bind, config, executor, layers, pacman, parser, policy
 
 
 class TestSecurityFixes(unittest.TestCase):
@@ -187,6 +187,45 @@ class TestSecurityFixes(unittest.TestCase):
             layers._compute_commit_id(s3.upper),
             layers._compute_commit_id(s4.upper),
         )
+
+
+class TestExtraPromisesPlumbing(unittest.TestCase):
+    """extra_promises must flow: POLICY_TABLE -> resolve -> stage3_env -> env.
+
+    Regression for the pre-existing dead-code bug where stage3_env never set
+    RATTAN_EXTRA_PROMISES, so git (sendfd) / gcc (prot_exec) silently ran with
+    the baseline promise set only.
+    """
+
+    def test_resolve_carries_extra_promises(self):
+        self.assertEqual(policy.resolve("git status").extra_promises, "sendfd")
+        self.assertEqual(policy.resolve("gcc -c x.c").extra_promises, "prot_exec")
+        self.assertEqual(policy.resolve("cc -c x.c").extra_promises, "prot_exec")
+        self.assertEqual(policy.resolve("echo hi").extra_promises, "")
+
+    def test_stage3_env_sets_extra_promises(self):
+        env = policy.stage3_env(policy.resolve("git status"))
+        self.assertEqual(env.get("RATTAN_EXTRA_PROMISES"), "sendfd")
+        env = policy.stage3_env(policy.resolve("gcc -c x.c"))
+        self.assertEqual(env.get("RATTAN_EXTRA_PROMISES"), "prot_exec")
+        # A plain command must NOT set it (baseline stays tight).
+        env = policy.stage3_env(policy.resolve("echo hi"))
+        self.assertNotIn("RATTAN_EXTRA_PROMISES", env)
+
+    def test_extra_promises_reaches_invocation_env(self):
+        s = layers.create_session()
+        program = parser.parse("git status", {})
+        cmd_node = program.andors[0].pipelines[0].commands[0]
+        env_store = {"HOME": "/workspace", "PATH": "/usr/bin:/bin"}
+        inv = executor.build_invocation(cmd_node, s, env_store, "/workspace", 30)
+        self.assertEqual(inv.env.get("RATTAN_EXTRA_PROMISES"), "sendfd")
+        # The agent cannot override it: an attacker-supplied RATTAN_EXTRA_PROMISES
+        # in the env store is scrubbed, so only the policy value survives.
+        env_store2 = {"HOME": "/workspace", "PATH": "/usr/bin:/bin",
+                      "RATTAN_EXTRA_PROMISES": "bogus"}
+        inv2 = executor.build_invocation(cmd_node, s, env_store2, "/workspace", 30)
+        self.assertEqual(inv2.env.get("RATTAN_EXTRA_PROMISES"), "sendfd",
+                         "policy value must win over an agent-supplied override")
 
 
 if __name__ == "__main__":
