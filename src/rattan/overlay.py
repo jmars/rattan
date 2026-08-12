@@ -14,23 +14,36 @@ def provision(session: Session):
     os.makedirs(session.workspace, exist_ok=True)
 
 
-def lower_argv(session: Session) -> list[str]:
+def lower_argv(session: Session, extra_lowers: list[str] | None = None) -> list[str]:
     """Build the ``--overlay-src`` argv fragments for bwrap.
 
     Returns a flat list like
     ``["--overlay-src", base, "--overlay-src", layer1, ...]``.
+
+    *extra_lowers* (optional) appends additional lower directories after the
+    committed layer stack — used by background jobs to layer a reflink snapshot
+    of the live session upper on top of the committed layers.
     """
-    lowers = lower_stack(session)
+    lowers = list(lower_stack(session))
+    if extra_lowers:
+        lowers.extend(extra_lowers)
     argv: list[str] = []
     for lower in lowers:
         argv.extend(["--overlay-src", lower])
     return argv
 
 
-def overlay_argv(session: Session, dest: str = "/") -> list[str]:
+def overlay_argv(
+    session: Session,
+    dest: str = "/",
+    upper: str | None = None,
+    work: str | None = None,
+) -> list[str]:
     """Build the ``--overlay`` argv fragment for bwrap.
 
-    Returns ``["--overlay", <upper>, <work>, <dest>]``.
+    Returns ``["--overlay", <upper>, <work>, <dest>]``. When *upper*/*work* are
+    given they override ``session.upper``/``session.work`` (used by background
+    jobs which run on their own private upper/work dirs).
     """
-    return ["--overlay", session.upper, session.work, dest]
+    return ["--overlay", upper or session.upper, work or session.work, dest]
 

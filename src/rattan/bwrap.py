@@ -18,6 +18,9 @@ def agent_argv(
     cwd: str = "/workspace",
     extra_binds: list[str] | None = None,
     extra_landlock: list[str] | None = None,
+    extra_lowers: list[str] | None = None,
+    upper: str | None = None,
+    work: str | None = None,
 ) -> list[str]:
     """Build the full ``bwrap`` argv for an agent-mode command.
 
@@ -27,6 +30,11 @@ def agent_argv(
     ``--ro-bind <host> <mnt>`` argv fragments (from ``bind_host_dir``).
     *extra_landlock* is an optional list of ``path:perms`` entries appended to
     the LANDLOCK_SPEC (so a bound mount point is visible to the command).
+    *extra_lowers* (optional) appends additional ``--overlay-src`` lower dirs
+    after the committed layer stack (background-job snapshots).
+    *upper*/*work* (optional) override the overlay upper/work dirs (background
+    jobs run on their own private upper/work so they can overlap foreground
+    commands without contending for the session's live upper).
     """
     stage3 = config.stage3_path()
 
@@ -36,9 +44,9 @@ def agent_argv(
         "--uid", "1000",
         "--gid", "1000",
         # Overlay lower dirs
-        *overlay.lower_argv(session),
+        *overlay.lower_argv(session, extra_lowers=extra_lowers),
         # Overlay mount at /
-        *overlay.overlay_argv(session, "/"),
+        *overlay.overlay_argv(session, "/", upper=upper, work=work),
         # Runtime mounts
         "--proc", "/proc",
         "--dev", "/dev",
