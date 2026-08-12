@@ -103,6 +103,22 @@ bwrap \
         echo "→ Bootstrap install complete."
     ' || die "bwrap bootstrap failed."
 
+# === Install custom non-pacman files (vendor/rootfs-extra) ====================
+# Any tree under vendor/rootfs-extra is copied verbatim into the base rootfs.
+# Place static artifacts (e.g. a prebuilt binary under usr/local/bin) here so
+# they are baked into the immutable base and present in every session. This must
+# run BEFORE the manifest is written so the extra files are integrity-checked
+# too, and before `chmod -R a-w` so they are locked read-only like the rest.
+ROOTFS_EXTRA="${REPO_ROOT}/vendor/rootfs-extra"
+if [ -d "$ROOTFS_EXTRA" ]; then
+    if [ -n "$(find "$ROOTFS_EXTRA" -mindepth 1 -print -quit)" ]; then
+        green "Installing custom rootfs files from vendor/rootfs-extra..."
+        cp -a "$ROOTFS_EXTRA/." "$BASE/"
+    else
+        green "vendor/rootfs-extra is empty; skipping."
+    fi
+fi
+
 # === Write manifest (BEFORE making base read-only) ===========================
 green "Writing MANIFEST.sha256..."
 # Ensure every file/dir is readable by the owner so find/sha256sum can traverse

@@ -43,8 +43,9 @@ re-bootstraps if the base has drifted.
    - `pacman-key --populate archlinux`
    - `pacman -Sy`
    - `pacman -S --needed base`
-4. **Immutable**: `chmod -R a-w <base>`.
-5. **Write** `MANIFEST.sha256` (one sha256 line per file, relative to base).
+4. **Install custom files** from `vendor/rootfs-extra/` (verbatim copy into the base).
+5. **Immutable**: `chmod -R a-w <base>`.
+6. **Write** `MANIFEST.sha256` (one sha256 line per file, relative to base).
 
 ## Where files land
 
@@ -52,6 +53,41 @@ re-bootstraps if the base has drifted.
 - Base rootfs: `~/.local/share/rattan/rootfs/base/`
 - Manifest: `~/.local/share/rattan/rootfs/base/MANIFEST.sha256`
 - Override the data dir with `RATTAN_DATA_DIR=/some/other/path`.
+
+## Adding non-pacman files (`vendor/rootfs-extra`)
+
+The base rootfs is built from pacman packages plus anything under
+`vendor/rootfs-extra/`, which is copied verbatim into the base during bootstrap
+(before the manifest is written and the base is locked read-only). This is how
+you add a prebuilt binary, config, or data that isn't from a pacman package.
+
+Layout mirrors the base rootfs:
+
+```
+vendor/rootfs-extra/usr/local/bin/mytool   →  <base>/usr/local/bin/mytool
+vendor/rootfs-extra/etc/motd               →  <base>/etc/motd
+```
+
+These files are included in `MANIFEST.sha256` (integrity-checked at startup) and
+are immutable, so the agent can execute but never modify them (they live in the
+read-only overlay lower layer).
+
+To apply after a change:
+
+```sh
+# drop files under vendor/rootfs-extra/, then rebuild the base
+rm -rf ~/.local/share/rattan/rootfs/base && make bootstrap-rootfs
+
+# or patch an already-built base without a full re-download:
+BASE=~/.local/share/rattan/rootfs/base
+chmod -R u+w "$BASE"
+cp -a vendor/rootfs-extra/. "$BASE/"
+(cd "$BASE" && find . -type f -not -name 'MANIFEST.sha256' -print0 \
+    | sort -z | xargs -0 sha256sum > MANIFEST.sha256)
+chmod -R a-w "$BASE"
+```
+
+The directory is kept in git via `.gitkeep`; delete it once you add a real file.
 
 ## Idempotency
 
