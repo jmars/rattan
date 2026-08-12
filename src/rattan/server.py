@@ -520,6 +520,16 @@ def main(argv=None):
             bind.validate_host_bind(host, mount, mode)
             for host, mount, mode in _parse_default_binds(args)
         ]
+        # --bind-cwd: bind the server's current working directory (the dir the
+        # MCP server was launched from) onto /workspace (rw), and default cwd to
+        # /workspace. The agent then works directly in the host launch dir — no
+        # cd into a container-specific path needed, since /workspace *is* the
+        # host dir it launched from.
+        if "--bind-cwd" in args:
+            launch_dir = os.path.abspath(os.getcwd())
+            defaults.append(
+                bind.validate_host_bind(launch_dir, "/workspace", "rw")
+            )
     except ValueError as e:
         print(f"rattan: invalid --bind: {e}", file=sys.stderr)
         return 1

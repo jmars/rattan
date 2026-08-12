@@ -326,6 +326,44 @@ class TestDefaultBinds(unittest.TestCase):
             import shutil
             shutil.rmtree(host, ignore_errors=True)
 
+    def test_bind_cwd_binds_launch_dir_to_workspace(self):
+        """--bind-cwd binds the server launch dir onto /workspace (rw)."""
+        from rattan import bind
+        from rattan.server import _parse_default_binds
+        # Simulate main()'s --bind-cwd handling: build the default list exactly
+        # as main() does (parsed binds + a validate of os.getcwd() -> /workspace).
+        host = tempfile.mkdtemp(prefix="rattan-bindcwd-",
+                                dir=os.path.expanduser("~"))
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(host)
+            defaults = [
+                bind.validate_host_bind(h, m, mode)
+                for h, m, mode in _parse_default_binds([])
+            ]
+            launch_dir = os.path.abspath(os.getcwd())
+            defaults.append(
+                bind.validate_host_bind(launch_dir, "/workspace", "rw")
+            )
+            self.assertEqual(len(defaults), 1)
+            self.assertEqual(defaults[0].mount_point, "/workspace")
+            self.assertEqual(defaults[0].mode, "rw")
+            self.assertEqual(defaults[0].host_path, os.path.realpath(host))
+
+            bind.set_default_binds(defaults)
+            sb = bind.get_session_binds("bindcwd-sid")
+            ws = [x for x in sb.binds if x.mount_point == "/workspace"]
+            self.assertEqual(len(ws), 1)
+            self.assertEqual(ws[0].mode, "rw")
+            self.assertEqual(ws[0].host_path, os.path.realpath(host))
+        finally:
+            os.chdir(old_cwd)
+            from rattan import bind as _b
+            _b.set_default_binds([])
+            _b.clear_session_binds("bindcwd-sid")
+            import shutil
+            shutil.rmtree(host, ignore_errors=True)
+
 
 class TestCdBuiltin(unittest.TestCase):
     """Unit tests for the in-process `cd` builtin (_try_cd).
