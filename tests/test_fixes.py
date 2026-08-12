@@ -263,5 +263,51 @@ class TestExtraPromisesPlumbing(unittest.TestCase):
                          "policy value must win over an agent-supplied override")
 
 
+class TestDefaultBinds(unittest.TestCase):
+    """Server --bind / --bind-ro args and per-session default-bind seeding."""
+
+    def test_parse_default_binds(self):
+        from rattan.server import _parse_default_binds
+        self.assertEqual(
+            _parse_default_binds(["--bind", "~/projects=/workspace/projects"]),
+            [("~/projects", "/workspace/projects", "rw")],
+        )
+        self.assertEqual(
+            _parse_default_binds(
+                ["--bind-ro", "/x=/mnt/x", "--bind", "/y=/mnt/y"]
+            ),
+            [("/x", "/mnt/x", "ro"), ("/y", "/mnt/y", "rw")],
+        )
+        self.assertEqual(_parse_default_binds(["--probe"]), [])
+        with self.assertRaises(ValueError):
+            _parse_default_binds(["--bind"])
+        with self.assertRaises(ValueError):
+            _parse_default_binds(["--bind", "no-equals"])
+
+    def test_default_binds_seed_new_sessions(self):
+        from rattan import bind
+        host = tempfile.mkdtemp(prefix="rattan-defbind-",
+                                dir=os.path.expanduser("~"))
+        try:
+            b = bind.validate_host_bind(host, "/workspace/proj", "rw")
+            bind.set_default_binds([b])
+            # A fresh session gets the default without an explicit bind call.
+            sb = bind.get_session_binds("defbind-sid-1")
+            self.assertIn("/workspace/proj",
+                          [x.mount_point for x in sb.binds])
+            self.assertEqual(sb.binds[0].mode, "rw")
+            # A second fresh sid is also seeded.
+            sb2 = bind.get_session_binds("defbind-sid-2")
+            self.assertIn("/workspace/proj",
+                          [x.mount_point for x in sb2.binds])
+        finally:
+            from rattan import bind as _b
+            _b.set_default_binds([])
+            _b.clear_session_binds("defbind-sid-1")
+            _b.clear_session_binds("defbind-sid-2")
+            import shutil
+            shutil.rmtree(host, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

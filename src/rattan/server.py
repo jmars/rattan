@@ -465,6 +465,31 @@ def _build_tools(fastmcp: FastMCP):
 # ---------------------------------------------------------------------------
 
 
+def _parse_default_binds(argv: list[str]) -> list[tuple[str, str, str]]:
+    """Parse ``--bind HOST=MOUNT`` / ``--bind-ro HOST=MOUNT`` into ``(host, mount, mode)``.
+
+    ``--bind`` mounts read-write; ``--bind-ro`` read-only. Both repeatable.
+    Raises ``ValueError`` on a missing argument or malformed spec.
+    """
+    binds: list[tuple[str, str, str]] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--bind", "--bind-ro"):
+            mode = "rw" if a == "--bind" else "ro"
+            if i + 1 >= len(argv):
+                raise ValueError(f"{a} requires an argument (HOST=MOUNT)")
+            spec = argv[i + 1]
+            if "=" not in spec:
+                raise ValueError(f"{a} expects HOST=MOUNT, got {spec!r}")
+            host, mount = spec.split("=", 1)
+            binds.append((host, mount, mode))
+            i += 2
+        else:
+            i += 1
+    return binds
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if "--probe" in args:
@@ -472,6 +497,19 @@ def main(argv=None):
 
     _startup_gate()
     _setup_shutdown()
+
+    # Configure default host binds (auto-applied to every session). Fail fast on
+    # a bad spec so a misconfigured bind is caught at startup, not per-command.
+    from rattan import bind
+    try:
+        defaults = [
+            bind.validate_host_bind(host, mount, mode)
+            for host, mount, mode in _parse_default_binds(args)
+        ]
+    except ValueError as e:
+        print(f"rattan: invalid --bind: {e}", file=sys.stderr)
+        return 1
+    bind.set_default_binds(defaults)
 
     fastmcp = FastMCP("rattan")
     _build_tools(fastmcp)

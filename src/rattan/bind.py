@@ -74,12 +74,36 @@ class SessionBinds:
 # dataclass to avoid changing its construction sites.
 _SESSION_BINDS: dict[str, SessionBinds] = {}
 
+# Default binds applied to every session created after they are set. Populated
+# from the server's --bind / --bind-ro CLI args (see server.main), so a bind
+# like ~/projects is auto-mounted without the agent calling bind_host_dir.
+_DEFAULT_BINDS: list[HostBind] = []
+
+
+def set_default_binds(binds: list[HostBind]) -> None:
+    """Set the default binds auto-applied to newly-created sessions."""
+    _DEFAULT_BINDS[:] = list(binds)
+
+
+def default_binds() -> list[HostBind]:
+    """Return a copy of the configured default binds."""
+    return list(_DEFAULT_BINDS)
+
 
 def get_session_binds(sid: str) -> SessionBinds:
     """Return (creating if needed) the :class:`SessionBinds` for *sid*."""
-    if sid not in _SESSION_BINDS:
-        _SESSION_BINDS[sid] = SessionBinds()
-    return _SESSION_BINDS[sid]
+    sb = _SESSION_BINDS.get(sid)
+    if sb is None:
+        sb = SessionBinds()
+        # Seed a fresh session with the configured default binds (deduped by
+        # mount_point) so they apply without an explicit bind_host_dir call.
+        seen = set()
+        for b in _DEFAULT_BINDS:
+            if b.mount_point not in seen:
+                sb.binds.append(b)
+                seen.add(b.mount_point)
+        _SESSION_BINDS[sid] = sb
+    return sb
 
 
 def clear_session_binds(sid: str) -> None:
