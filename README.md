@@ -124,6 +124,24 @@ Only user data directories can be bound: a non-hidden subdir under `$HOME`
 another user's home, `$HOME` itself and every hidden `$HOME/.*` subtree
 (config/credentials like `.ssh`, `.config`), and the rattan data dir.
 
+## Server CLI
+
+The MCP server accepts a few startup flags:
+
+```bash
+rattan [--bind HOST=MOUNT[:ro|rw] ...] [--bind-cwd]
+```
+
+- `--bind HOST=MOUNT[:ro|rw]` — bind a host directory into the container for
+  every session (read-write by default; `--bind-ro` is the read-only alias).
+  Repeatable. Same path rules as `bind_host_dir` above.
+- `--bind-cwd` — bind the **directory the server was launched from** onto
+  `/workspace` (read-write), with `/workspace` as the default working directory.
+  The agent then operates directly on that host directory via `/workspace` —
+  no `cd` into a container-specific path is needed, because `/workspace` *is*
+  the host dir the server launched from. Both reads and writes flow straight
+  through to the host directory.
+
 ## Verify
 
 ```bash
