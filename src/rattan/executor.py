@@ -7,9 +7,11 @@ assembles the bwrap argv, and runs it via ``subprocess.Popen``.
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,7 +26,7 @@ from rattan.parser import (
     ProgramNode,
     Word,
 )
-from rattan.policy import ResolvedPolicy, resolve, stage3_env
+from rattan.policy import ResolvedPolicy, resolve, resolve_pipeline, stage3_env
 from rattan.redirects import FdDefaults, FdPlan, RedirectPlan
 
 
@@ -183,6 +185,92 @@ def build_invocation(
     )
 
 
+def _render_command(cmd: CommandNode, env_store: dict[str, str]) -> str:
+    """Render a :class:`CommandNode` back into a shell command string.
+
+    Used to build the ``/bin/sh -c`` payload for a multi-command pipeline, which
+    is executed inside a SINGLE sandbox (one overlay mount). Words are expanded
+    against *env_store* and shell-quoted; assignment prefixes and redirects are
+    reconstructed.
+    """
+    parts: list[str] = []
+
+    for var, val in cmd.assignments:
+        parts.append(f"{var}={shlex.quote(val)}")
+
+    words = _resolve_argv(cmd, env_store)
+    parts.extend(shlex.quote(w) for w in words)
+
+    # Redirects: reconstruct fd/op/target.
+    for r in cmd.redirects:
+        if r.op in ("1>&2", "2>&1"):
+            parts.append(r.op)
+        else:
+            fd = "" if r.fd is None else str(r.fd)
+            parts.append(f"{fd}{r.op} {shlex.quote(r.target)}")
+
+    return " ".join(parts)
+
+
+def build_pipeline_invocation(
+    pipeline: PipelineNode,
+    session: Session,
+    env_store: dict[str, str],
+    cwd: str,
+    timeout: float,
+) -> Invocation:
+    """Build a SINGLE :class:`Invocation` that runs a multi-command pipeline.
+
+    A two-command pipeline (``a | b``) cannot run as two separate bwrap mounts
+    because only one overlay may mount a given upperdir+workdir pair at a time.
+    Instead the whole pipeline is run inside one sandbox via
+    ``/bin/sh -c '<a> | <b>'``; the shell performs the pipe. The seccomp/Landlock
+    policy is the union of every stage's policy (see :func:`resolve_pipeline`).
+
+    Redirects on the pipeline as a whole are handled by the shell within the
+    sandbox, so no host-side fd plan is built here.
+    """
+    _validate_cwd(cwd)
+
+    command_strings: list[str] = []
+    rendered: list[str] = []
+    for cmd in pipeline.commands:
+        argv = _resolve_argv(cmd, env_store)
+        if not argv:
+            raise EmptyInvocation("pipeline command has no executable words")
+        cs = " ".join(argv)
+        command_strings.append(cs)
+        rendered.append(_render_command(cmd, env_store))
+
+    shell_payload = " | ".join(rendered)
+    user_argv = ["/bin/sh", "-c", shell_payload]
+
+    resolved = resolve_pipeline(command_strings, mode="agent")
+
+    # Session host binds (from bind_host_dir)
+    from rattan.bind import get_session_binds
+    sb = get_session_binds(session.sid)
+    extra_binds = sb.bwrap_bind_argv() if sb.binds else []
+    extra_landlock = sb.landlock_extra() if sb.binds else None
+
+    bwrap_argv = bwrap.agent_argv(
+        session, resolved, user_argv, cwd=cwd,
+        extra_binds=extra_binds, extra_landlock=extra_landlock,
+    )
+
+    sub_env = _scrub_control_env(env_store)
+    sub_env.update(stage3_env(resolved))
+
+    return Invocation(
+        bwrap_argv=bwrap_argv,
+        env=sub_env,
+        cwd="/",
+        fd_plan=FdPlan(),
+        timeout=timeout,
+        command=" | ".join(command_strings),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Host-side redirect resolution
 # ---------------------------------------------------------------------------
@@ -324,74 +412,83 @@ def run_command(inv: Invocation) -> dict:
 
     Returns a dict with keys ``command``, ``output``, ``rc``.
     On timeout the process group is killed with ``SIGKILL``.
+
+    On btrfs the previous command's overlay mount namespace teardown can race
+    with the next ``--overlay`` mount reusing the same upperdir+workdir, so
+    bwrap occasionally exits with ``EBUSY`` ("Device or resource busy"). We
+    retry with a short backoff until the teardown completes (bounded).
     """
-    try:
-        spawn_kwargs, opened = _spawn_kwargs(inv.fd_plan)
-    except (OSError, IOError) as e:
-        # Clean up any paths registered so far
-        for p in inv.fd_plan.cleanup_paths:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-        return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
+    _EBUSY = "Device or resource busy"
+    max_attempts = 5
+    backoff = 0.1
 
-    try:
-        proc = subprocess.Popen(
-            inv.bwrap_argv,
-            env={**_scrub_control_env(os.environ), **inv.env},
-            start_new_session=True,
-            **spawn_kwargs,
-        )
-    except (OSError, IOError) as e:
-        for f in opened:
-            try:
-                f.close()
-            except OSError:
-                pass
-        for p in inv.fd_plan.cleanup_paths:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-        return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
+    def _attempt():
+        try:
+            spawn_kwargs, opened = _spawn_kwargs(inv.fd_plan)
+        except (OSError, IOError) as e:
+            for p in inv.fd_plan.cleanup_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
 
-    try:
-        out_bytes, _ = proc.communicate(timeout=inv.timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        # Kill the whole process group
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+            proc = subprocess.Popen(
+                inv.bwrap_argv,
+                env={**_scrub_control_env(os.environ), **inv.env},
+                start_new_session=True,
+                **spawn_kwargs,
+            )
+        except (OSError, IOError) as e:
+            for f in opened:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+            for p in inv.fd_plan.cleanup_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+            return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
+
         try:
-            out_bytes, _ = proc.communicate(timeout=5)
+            out_bytes, _ = proc.communicate(timeout=inv.timeout)
+            rc = proc.returncode
         except subprocess.TimeoutExpired:
-            proc.kill()
-            out_bytes, _ = proc.communicate()
-        rc = -1  # signal timeout
-    finally:
-        # Close any opened fd objects
-        for f in opened:
             try:
-                f.close()
+                os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 pass
-        # Remove temp files created for /tmp redirects
-        for p in inv.fd_plan.cleanup_paths:
             try:
-                os.unlink(p)
-            except OSError:
-                pass
+                out_bytes, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out_bytes, _ = proc.communicate()
+            rc = -1  # signal timeout
+        finally:
+            for f in opened:
+                try:
+                    f.close()
+                except OSError:
+                    pass
+            for p in inv.fd_plan.cleanup_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
-    output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
+        output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
+        return {"command": inv.command, "output": output, "rc": rc}
 
-    return {
-        "command": inv.command,
-        "output": output,
-        "rc": rc,
-    }
+    result = _attempt()
+    for _ in range(max_attempts - 1):
+        if result["rc"] != 1 or _EBUSY not in result["output"]:
+            break
+        time.sleep(backoff)
+        result = _attempt()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +507,10 @@ def execute_pipeline(
     """Execute a single :class:`PipelineNode`.
 
     For single-command pipelines, runs directly.
-    For two-command pipelines, pipes stdout of the first into stdin of the
-    second and returns the combined result.
+    For two-command pipelines, the whole pipeline is run inside ONE sandbox via
+    ``/bin/sh -c 'a | b'`` (a single overlay mount). Two separate bwrap mounts
+    cannot share the same upperdir+workdir pair simultaneously, so running each
+    stage as its own sandbox is impossible.
     """
     if len(pipeline.commands) == 0:
         raise EmptyInvocation("empty pipeline")
@@ -422,98 +521,11 @@ def execute_pipeline(
         )
         return run_command(inv)
 
-    # Two-command pipeline: pipe cmd0 stdout → cmd1 stdin
-    cmd0 = pipeline.commands[0]
-    cmd1 = pipeline.commands[1]
-
-    inv0 = build_invocation(cmd0, session, env_store, cwd, timeout)
-    inv1 = build_invocation(cmd1, session, env_store, cwd, timeout)
-
-    # Build spawn kwargs for both commands
-    try:
-        kw0, opened0 = _spawn_kwargs(inv0.fd_plan)
-        kw1, opened1 = _spawn_kwargs(inv1.fd_plan)
-    except (OSError, IOError) as e:
-        for plan in (inv0.fd_plan, inv1.fd_plan):
-            for p in plan.cleanup_paths:
-                try:
-                    os.unlink(p)
-                except OSError:
-                    pass
-        return {
-            "command": command_str,
-            "output": f"redirect error: {e}",
-            "rc": 1,
-        }
-
-    all_opened = opened0 + opened1
-    all_cleanup = inv0.fd_plan.cleanup_paths + inv1.fd_plan.cleanup_paths
-
-    # cmd0: stdout must go to the pipe, keep stdin/stderr redirects
-    kw0["stdout"] = subprocess.PIPE
-    proc0 = subprocess.Popen(
-        inv0.bwrap_argv,
-        env={**_scrub_control_env(os.environ), **inv0.env},
-        start_new_session=True,
-        **kw0,
-    )
-
-    # cmd1: stdin comes from cmd0's stdout, keep stdout/stderr redirects
-    kw1["stdin"] = proc0.stdout
-    proc1 = subprocess.Popen(
-        inv1.bwrap_argv,
-        env={**_scrub_control_env(os.environ), **inv1.env},
-        start_new_session=True,
-        **kw1,
-    )
-    if proc0.stdout:
-        proc0.stdout.close()
-
-    try:
-        out_bytes, _ = proc1.communicate(timeout=timeout)
-        rc = proc1.returncode
-        # Wait for proc0 too
-        try:
-            proc0.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc0.kill()
-            proc0.wait()
-    except subprocess.TimeoutExpired:
-        for p in (proc0, proc1):
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
-        try:
-            out_bytes, _ = proc1.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc1.kill()
-            out_bytes, _ = proc1.communicate()
-        rc = -1
-    finally:
-        for f in all_opened:
-            try:
-                f.close()
-            except OSError:
-                pass
-        for p in all_cleanup:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-
-    output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
-
-    full_command = command_str or " | ".join(
-        " ".join(w.expand(env_store) for w in cmd.argv)
-        for cmd in pipeline.commands
-    )
-
-    return {
-        "command": full_command,
-        "output": output,
-        "rc": rc,
-    }
+    # Multi-command pipeline: single-sandbox execution via /bin/sh -c.
+    inv = build_pipeline_invocation(pipeline, session, env_store, cwd, timeout)
+    result = run_command(inv)
+    result["command"] = command_str or result["command"]
+    return result
 
 
 def execute_andor(

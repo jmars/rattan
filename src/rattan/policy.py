@@ -168,6 +168,42 @@ def resolve(command: str, mode: str = "agent") -> ResolvedPolicy:
     )
 
 
+def resolve_pipeline(command_strings: list[str], mode: str = "agent") -> ResolvedPolicy:
+    """Resolve a single combined policy for a pipeline of commands.
+
+    A pipeline is executed inside ONE sandbox (via ``/bin/sh -c``), so its
+    seccomp/Landlock policy must be the **union** of every stage's needs: the
+    union of ``extra_promises`` (pledge tokens), the joined ``extra_landlock``
+    specs, the union of rlimits, and ``allow_ptrace`` if any stage needs it.
+    The shared baseline is unchanged.
+    """
+    if mode != "agent":
+        raise ValueError(f"unsupported mode {mode!r} (only 'agent' in M3)")
+
+    extra_promises: set[str] = set()
+    landlock: list[str] = []
+    rlimits: list[str] = []
+    allow_ptrace = False
+
+    for cs in command_strings:
+        rp = resolve(cs, mode=mode)
+        if rp.extra_promises:
+            extra_promises.update(rp.extra_promises.split())
+        if rp.landlock_spec:
+            landlock.append(rp.landlock_spec)
+        if rp.rlimits:
+            rlimits.append(rp.rlimits)
+        allow_ptrace = allow_ptrace or rp.allow_ptrace
+
+    return ResolvedPolicy(
+        promises=AGENT_BASELINE_PROMISES,
+        landlock_spec=";".join(landlock),
+        rlimits=";".join(rlimits),
+        allow_ptrace=allow_ptrace,
+        extra_promises=" ".join(sorted(extra_promises)),
+    )
+
+
 def stage3_env(resolved: ResolvedPolicy) -> dict[str, str]:
     """Build the extra environment variables that stage3 reads.
 
