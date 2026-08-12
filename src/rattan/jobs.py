@@ -40,6 +40,7 @@ class JobRecord:
     status: JobStatus = JobStatus.RUNNING
     exit_code: Optional[int] = None
     output_preview: str = ""      # most recent tail, updated on poll
+    root: str = ""                # private job dir (upper/work/snapshot) to clean up
 
 
 # Module-level registry
@@ -101,6 +102,26 @@ def _poll_job_now(job_id: int):
     rec.finished_at = time.time()
     rec.output_preview = _tail_log(rec.log_path, 8192)
     rec.status = JobStatus.DONE if rc == 0 else JobStatus.FAILED
+    _cleanup_job(rec)
+
+
+def _cleanup_job(rec: JobRecord):
+    """Remove a finished job's private dir (upper/work/snapshot) best-effort.
+
+    The job's overlay mount teardown (bwrap namespace teardown on btrfs) can lag
+    the process-exit detection by ~200ms, so the dir may be busy (mode-000
+    work/work + EBUSY) the instant we poll it done. Retry with a short backoff;
+    ``layers._rmtree_force`` handles the mode-000 work/work entries.
+    """
+    root = getattr(rec, "root", "")
+    if not root or not os.path.isdir(root):
+        return
+    from rattan.layers import _rmtree_force
+    for _ in range(8):  # ~0.7s total budget
+        _rmtree_force(root)  # swallows per-entry failures; retry if still present
+        if not os.path.exists(root):
+            return
+        time.sleep(0.1)
 
 
 def _tail_log(log_path: str, nbytes: int) -> str:
@@ -123,11 +144,13 @@ def start_job(
     log_path: str,
     *,
     timeout: int = 300,
+    root: str = "",
 ) -> int:
     """Register a background job and return its job_id.
 
     *popen* is the already-launched bwrap Popen. Registers under lock, starts
-    the reaper, and returns the monotonically-allocated job_id.
+    the reaper, and returns the monotonically-allocated job_id. *root* is the
+    job's private dir (upper/work/snapshot), removed when the job finishes.
     """
     global _JOB_COUNTER
     with _JOB_COUNTER_LOCK:
@@ -142,6 +165,7 @@ def start_job(
         command=command,
         cwd=cwd,
         started_at=time.time(),
+        root=root,
     )
     with _JOBS_LOCK:
         _JOBS[job_id] = rec
@@ -168,6 +192,7 @@ def job_status(job_id: int) -> dict:
         "started_at": rec.started_at,
         "finished_at": rec.finished_at,
         "exit_code": rec.exit_code,
+        "root": rec.root,
     }
 
 
@@ -220,6 +245,7 @@ def job_kill(job_id: int) -> dict:
     rec.status = JobStatus.CANCELED
     rec.exit_code = -signal.SIGTERM
     rec.finished_at = time.time()
+    _cleanup_job(rec)
     return {
         "job_id": job_id,
         "status": rec.status.value,

@@ -124,6 +124,10 @@ def build_invocation(
     env_store: dict[str, str],
     cwd: str,
     timeout: float,
+    *,
+    extra_lowers: list[str] | None = None,
+    upper: str | None = None,
+    work: str | None = None,
 ) -> Invocation:
     """Build an :class:`Invocation` from a parsed :class:`CommandNode`.
 
@@ -133,6 +137,8 @@ def build_invocation(
         env_store: Environment variables available for ``$VAR`` expansion.
         cwd: Container working directory (must be under ``/workspace``).
         timeout: Per-command timeout in seconds.
+        extra_lowers: Additional ``--overlay-src`` lower dirs (bg snapshots).
+        upper/work: Override overlay upper/work dirs (bg private upper/work).
     """
     _validate_cwd(cwd)
 
@@ -168,6 +174,7 @@ def build_invocation(
     bwrap_argv = bwrap.agent_argv(
         session, resolved, user_argv, cwd=cwd,
         extra_binds=extra_binds, extra_landlock=extra_landlock,
+        extra_lowers=extra_lowers, upper=upper, work=work,
     )
 
     # Build env for subprocess (stage3 env vars). Scrub control-prefixed vars

@@ -356,7 +356,7 @@ def _build_tools(fastmcp: FastMCP):
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, f"job-{int(time.time() * 1000)}.log")
         try:
-            popen, log_fh = bgdriver.launch_background_job(
+            popen, log_fh, job_root = bgdriver.launch_background_job(
                 command, s, cwd, timeout, log_path,
             )
         except (ValueError, parser.ParseError, InvocationError) as e:
@@ -364,7 +364,9 @@ def _build_tools(fastmcp: FastMCP):
         # The child subprocess has its own fd via the fork; close the parent's
         # copy so we don't leak one fd per job for the server lifetime (M-3).
         try:
-            job_id = jobs.start_job(command, cwd, popen, log_path, timeout=timeout)
+            job_id = jobs.start_job(
+                command, cwd, popen, log_path, timeout=timeout, root=job_root,
+            )
         finally:
             log_fh.close()
         return {
