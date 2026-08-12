@@ -23,3 +23,6 @@ tests/probes/reverse_order_probe
 *.ape
 *.com.dbg
 *.aarch64.elf
+*.ape.bak
+bin/.aarch64/
+bin/*.o
