@@ -4,9 +4,14 @@ PYTHONPATH ?= src
 COSMCC      ?= cosmocc
 ASSIMILATE  ?= assimilate
 STAGE3_SRC  := src/rattan/stage3.c
+PLEDGE_RATTAN_SRC := src/rattan/cosmo/pledge-rattan.c
 STAGE3_BIN  := bin/stage3
 PROBE_DIR   := tests/probes
 CFLAGS_STAGE3 := -std=c11 -Os -Wall -Wextra -Werror -fno-stack-protector
+# Relaxed flags for the vendored cosmocc pledge (its own code trips -Werror on
+# unused-param / sign-compare; must not be over-strict on third-party code).
+CFLAGS_STAGE3_RELAXED := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare \
+    -Wno-unused-function -fno-stack-protector
 
 .PHONY: all stage3 probes bootstrap-rootfs verify test lint
 
@@ -19,11 +24,19 @@ all:
 	@echo "  make bootstrap-rootfs  - bootstrap the Arch base rootfs (not implemented in M0)"
 	@echo "  make lint              - syntax-check src and tests"
 
-$(STAGE3_BIN): $(STAGE3_SRC)
+$(STAGE3_BIN): $(STAGE3_SRC) $(PLEDGE_RATTAN_SRC)
 	@mkdir -p bin
-	$(COSMCC) $(CFLAGS_STAGE3) -o bin/stage3.ape $(STAGE3_SRC)
+	# The vendored cosmocc pledge (pledge-rattan.c) must be linked into stage3 so
+	# its sys_pledge_linux/kPledge (patched to allow read-only xattr syscalls)
+	# override the precompiled libc's. It needs GNU extensions and a relaxed
+	# warning set (cosmocc's own code trips -Werror), so compile it separately
+	# from stage3.c (which stays strict c11 + -Werror).
+	$(COSMCC) -std=gnu11 $(CFLAGS_STAGE3_RELAXED) -c $(PLEDGE_RATTAN_SRC) -o bin/pledge-rattan.o
+	$(COSMCC) $(CFLAGS_STAGE3) -c $(STAGE3_SRC) -o bin/stage3.o
+	$(COSMCC) -o bin/stage3.ape bin/pledge-rattan.o bin/stage3.o
 	$(ASSIMILATE) -f bin/stage3.ape
 	mv bin/stage3.ape $(STAGE3_BIN)
+	rm -f bin/pledge-rattan.o bin/stage3.o
 	@file $(STAGE3_BIN) | grep -q 'ELF' || { echo "assimilate failed"; rm -f $(STAGE3_BIN); exit 1; }
 
 stage3: $(STAGE3_BIN)
