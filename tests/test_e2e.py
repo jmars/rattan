@@ -137,6 +137,29 @@ class TestE2EAgentMode(unittest.TestCase):
         self.assertEqual(result["rc"], 0)
         self.assertIn("hello", result["output"])
 
+    def test_cd_then_command(self):
+        """`cd X && command` runs the command from X (in-process builtin)."""
+        # Write a marker in /workspace, then cd into /workspace and pwd.
+        self._run("cd /tmp && pwd")
+        result = self._run("cd /tmp && pwd")
+        self.assertEqual(result["rc"], 0)
+        self.assertIn("/tmp", result["output"])
+
+    def test_cd_relative_chain(self):
+        """`cd X && command` resolves relative targets against the prior cwd."""
+        result = self._run("cd /workspace && cd tmp && pwd")
+        # /workspace/tmp may not exist; cd is a pure path builtin and does not
+        # check existence (matching a stateless per-call cd). Just verify it
+        # resolved to /workspace/tmp without error.
+        self.assertEqual(result["rc"], 0)
+        self.assertIn("/workspace/tmp", result["output"])
+
+    def test_cd_rejects_outside_roots(self):
+        """`cd /etc && command` short-circuits with rc 1; command not run."""
+        result = self._run("cd /etc && echo SHOULD_NOT_RUN")
+        self.assertNotEqual(result["rc"], 0)
+        self.assertNotIn("SHOULD_NOT_RUN", result["output"])
+
     def test_discard_default(self):
         """Write a file, discard, verify it's gone."""
         from rattan import layers

@@ -327,5 +327,67 @@ class TestDefaultBinds(unittest.TestCase):
             shutil.rmtree(host, ignore_errors=True)
 
 
+class TestCdBuiltin(unittest.TestCase):
+    """Unit tests for the in-process `cd` builtin (_try_cd).
+
+    `cd` must only work in the `cd X && command` form (as agents use it),
+    handled by the executor's own parser — never routed through /bin/sh.
+    These tests exercise the pure resolution logic with no subprocess/rootfs.
+    """
+
+    def _try(self, cmdstr, cur_cwd="/workspace"):
+        program = parser.parse(cmdstr)
+        pipeline = program.andors[0].pipelines[0]
+        return executor._try_cd(pipeline, {}, cur_cwd)
+
+    def test_valid_absolute(self):
+        new_cwd, stage = self._try("cd /tmp")
+        self.assertEqual(new_cwd, "/tmp")
+        self.assertEqual(stage["rc"], 0)
+        self.assertEqual(stage["output"], "")
+
+    def test_valid_relative_resolves_against_cwd(self):
+        new_cwd, stage = self._try("cd sub")
+        self.assertEqual(new_cwd, "/workspace/sub")
+        self.assertEqual(stage["rc"], 0)
+
+    def test_relative_from_changed_cwd(self):
+        new_cwd, stage = self._try("cd ../tmp", cur_cwd="/workspace")
+        self.assertEqual(new_cwd, "/tmp")
+        self.assertEqual(stage["rc"], 0)
+
+    def test_rejects_outside_roots(self):
+        new_cwd, stage = self._try("cd /etc")
+        self.assertIsNone(new_cwd)
+        self.assertEqual(stage["rc"], 1)
+        self.assertIn("must be under one of", stage["output"])
+
+    def test_bare_cd_errors(self):
+        new_cwd, stage = self._try("cd")
+        self.assertIsNone(new_cwd)
+        self.assertEqual(stage["rc"], 1)
+        self.assertIn("no directory", stage["output"])
+
+    def test_too_many_arguments(self):
+        new_cwd, stage = self._try("cd a b")
+        self.assertIsNone(new_cwd)
+        self.assertEqual(stage["rc"], 1)
+        self.assertIn("too many arguments", stage["output"])
+
+    def test_non_cd_command_passes_through(self):
+        new_cwd, stage = self._try("echo hi")
+        self.assertIsNone(new_cwd)
+        self.assertIsNone(stage)
+
+    def test_multicommand_pipeline_is_not_builtin(self):
+        # `cd /tmp && ls` parsed as separate pipelines; but a pipeline with
+        # >1 command (e.g. a pipe) must not be treated as a builtin.
+        program = parser.parse("cd /tmp | wc -l")
+        pipeline = program.andors[0].pipelines[0]
+        new_cwd, stage = executor._try_cd(pipeline, {}, "/workspace")
+        self.assertIsNone(new_cwd)
+        self.assertIsNone(stage)
+
+
 if __name__ == "__main__":
     unittest.main()
