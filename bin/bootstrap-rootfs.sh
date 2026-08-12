@@ -32,6 +32,31 @@ red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 die()   { red "ERROR: $*"; exit 1; }
 
+# === Personal rootfs config (external, optional) =============================
+# A user may extend the base rootfs without modifying the repo (so rattan's
+# main branch stays generic and needs no personal fork). Point RATTAN_ROOTFS_CONFIG
+# at a shell file that may set:
+#   ROOTFS_EXTRA_PACKAGES   — extra pacman packages (space-separated), installed
+#                             alongside `base` (e.g. "base-devel git musl mcpp").
+#   ROOTFS_EXTRA_DIRS       — extra directories copied verbatim into the base
+#                             rootfs, in addition to vendor/rootfs-extra (e.g. a
+#                             dir holding a prebuilt binary under usr/local/bin).
+# Defaults to $HOME/.config/rattan/rootfs.env. The file is sourced; keep it
+# trusted (it runs on your own host when you bootstrap).
+ROOTFS_CONFIG="${RATTAN_ROOTFS_CONFIG:-$HOME/.config/rattan/rootfs.env}"
+if [ -f "$ROOTFS_CONFIG" ]; then
+    # shellcheck disable=SC1090
+    . "$ROOTFS_CONFIG"
+    green "Loaded rootfs config: $ROOTFS_CONFIG"
+else
+    green "No rootfs config at $ROOTFS_CONFIG; using defaults."
+fi
+ROOTFS_EXTRA_PACKAGES="${ROOTFS_EXTRA_PACKAGES:-}"
+ROOTFS_EXTRA_DIRS="${ROOTFS_EXTRA_DIRS:-}"
+# Baseline packages: always `base`, plus any configured extras.
+INSTALL_PACKAGES="base ${ROOTFS_EXTRA_PACKAGES}"
+INSTALL_PACKAGES="${INSTALL_PACKAGES%"${INSTALL_PACKAGES##*[![:space:]]}"}"  # trim trailing ws
+
 # === Preflight ===============================================================
 command -v bwrap >/dev/null 2>&1 || die "bwrap not found. Install: sudo pacman -S bubblewrap"
 command -v zstd  >/dev/null 2>&1 || die "zstd not found. Install: sudo pacman -S zstd"
@@ -98,8 +123,8 @@ bwrap \
         pacman-key --populate archlinux
         echo "→ pacman -Sy (refresh package databases)"
         pacman -Sy --noconfirm
-        echo "→ pacman -S --needed base (install baseline packages)"
-        pacman -S --needed --noconfirm base
+        echo "→ pacman -S --needed'"${INSTALL_PACKAGES:+ $INSTALL_PACKAGES}"' (install baseline packages)"
+        pacman -S --needed --noconfirm '"${INSTALL_PACKAGES}"'
         echo "→ Bootstrap install complete."
     ' || die "bwrap bootstrap failed."
 
@@ -117,21 +142,31 @@ if ! grep -q '^user:' "$BASE/etc/group"; then
     printf 'user:x:1000:\n' >> "$BASE/etc/group"
 fi
 
-# === Install custom non-pacman files (vendor/rootfs-extra) ====================
+# === Install custom non-pacman files (vendor/rootfs-extra + config dirs) ======
 # Any tree under vendor/rootfs-extra is copied verbatim into the base rootfs.
 # Place static artifacts (e.g. a prebuilt binary under usr/local/bin) here so
 # they are baked into the immutable base and present in every session. This must
 # run BEFORE the manifest is written so the extra files are integrity-checked
 # too, and before `chmod -R a-w` so they are locked read-only like the rest.
+# Additional directories from the external config (ROOTFS_EXTRA_DIRS) are copied
+# the same way, so personal prebuilt binaries can be added without forking the
+# repo.
 ROOTFS_EXTRA="${REPO_ROOT}/vendor/rootfs-extra"
-if [ -d "$ROOTFS_EXTRA" ]; then
-    if [ -n "$(find "$ROOTFS_EXTRA" -mindepth 1 -print -quit)" ]; then
-        green "Installing custom rootfs files from vendor/rootfs-extra..."
-        cp -a "$ROOTFS_EXTRA/." "$BASE/"
-    else
-        green "vendor/rootfs-extra is empty; skipping."
+# The base root dir may be left non-writable by the pacman step; the extra-file
+# copy creates entries at the root, so ensure it is writable first.
+chmod u+w "$BASE" 2>/dev/null || true
+copy_rootfs_dir() {
+    local src="$1"
+    if [ -d "$src" ] && [ -n "$(find "$src" -mindepth 1 -print -quit)" ]; then
+        green "Installing custom rootfs files from $src"
+        cp -a "$src/." "$BASE/"
     fi
-fi
+}
+copy_rootfs_dir "$ROOTFS_EXTRA"
+for extra_dir in $ROOTFS_EXTRA_DIRS; do
+    # shellcheck disable=SC2086
+    copy_rootfs_dir "$(eval echo "$extra_dir")"
+done
 
 # === Write manifest (BEFORE making base read-only) ===========================
 green "Writing MANIFEST.sha256..."
