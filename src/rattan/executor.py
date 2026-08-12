@@ -535,6 +535,66 @@ def execute_pipeline(
     return result
 
 
+def _try_cd(pipeline: PipelineNode, env_store: dict[str, str], cur_cwd: str):
+    """Handle a `cd` builtin if *pipeline* is a single `cd` command.
+
+    Returns ``(new_cwd, stage_or_None)``:
+    * ``(new_dir, stage)`` — pipeline was a valid ``cd``; *new_dir* is the
+      resolved absolute container path (used for subsequent pipelines in the
+      same and-or chain) and *stage* is the structured result to record.
+    * ``(None, stage)`` — pipeline started with ``cd`` but was invalid; a
+      failing stage is returned, the working directory is unchanged.
+    * ``(None, None)`` — pipeline is not a ``cd`` command.
+
+    ``cd`` is handled in-process (no bwrap subprocess): it only affects the
+    working directory of *following* pipelines in the same command string
+    (the ``cd X && command`` form). A bare ``cd`` has no lasting effect beyond
+    the chain and does not touch the server's own cwd.
+    """
+    # Only a single-command pipeline can be a builtin.
+    if len(pipeline.commands) != 1:
+        return None, None
+    cmd = pipeline.commands[0]
+    argv = _resolve_argv(cmd, env_store)
+    if not argv or argv[0] != "cd":
+        return None, None
+
+    from rattan.contain import validate_cwd
+
+    args = argv[1:]
+    if len(args) > 1:
+        return None, {
+            "command": " ".join(argv),
+            "output": "cd: too many arguments",
+            "rc": 1,
+        }
+    if not args or args[0] == "":
+        # No $HOME concept in the sandbox; cd with no target is a no-op error.
+        return None, {
+            "command": "cd",
+            "output": "cd: no directory",
+            "rc": 1,
+        }
+
+    target = args[0]
+    if not os.path.isabs(target):
+        target = os.path.join(cur_cwd, target)
+    target = os.path.normpath(target)
+    try:
+        resolved = validate_cwd(target)
+    except ValueError as e:
+        return None, {
+            "command": "cd " + target,
+            "output": f"cd: {e}",
+            "rc": 1,
+        }
+    return resolved, {
+        "command": "cd " + args[0],
+        "output": "",
+        "rc": 0,
+    }
+
+
 def execute_andor(
     andor: AndOrNode,
     session: Session,
@@ -545,10 +605,15 @@ def execute_andor(
     """Execute an :class:`AndOrNode` with short-circuit ``&&`` / ``||``.
 
     Returns a structured dict with ``stages``, ``skipped``, ``rc``, ``output``.
+
+    A ``cd X`` pipeline updates the working directory for the remaining
+    pipelines in the same chain (``cd X && command``), implemented as an
+    in-process builtin — no bwrap subprocess and no shell routing.
     """
     stages: list[dict] = []
     last_rc = 0
     skipped = False
+    cur_cwd = cwd
 
     for i, pipeline in enumerate(andor.pipelines):
         if i > 0:
@@ -560,8 +625,17 @@ def execute_andor(
                 skipped = True
                 continue
 
+        # `cd` builtin — updates cur_cwd for subsequent pipelines.
+        new_cwd, cd_stage = _try_cd(pipeline, env_store, cur_cwd)
+        if cd_stage is not None:
+            stages.append(cd_stage)
+            if new_cwd is not None:
+                cur_cwd = new_cwd
+            last_rc = cd_stage["rc"]
+            continue
+
         result = execute_pipeline(
-            pipeline, session, env_store, cwd, timeout
+            pipeline, session, env_store, cur_cwd, timeout
         )
         stages.append(result)
         last_rc = result["rc"]
