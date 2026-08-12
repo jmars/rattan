@@ -118,8 +118,11 @@ shell_job_wait(job_id=1)
 bind_host_dir(host_path="/home/me/data", mount_point="/mnt/data", mode="ro")
 ```
 
-`bind_host_dir` rejects `/`, `$HOME`, `/etc`, `/proc`, `/sys`, and the rattan
-data dir.
+Only user data directories can be bound: a non-hidden subdir under `$HOME`
+(e.g. `~/projects/foo`). `bind_host_dir` rejects `/`, all system dirs
+(`/etc /proc /sys /usr /var /boot /dev /run /bin /lib /root /tmp /opt /srv ...`),
+another user's home, `$HOME` itself and every hidden `$HOME/.*` subtree
+(config/credentials like `.ssh`, `.config`), and the rattan data dir.
 
 ## Verify
 

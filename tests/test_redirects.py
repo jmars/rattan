@@ -440,7 +440,10 @@ class TestRedirectUnderBind(unittest.TestCase):
     def setUp(self):
         from rattan import layers
         self.session = layers.create_session()
-        self.hostdir = tempfile.mkdtemp(prefix="rattan-bind-host-")
+        # Host dir must be a bindable user-data path (non-hidden, under $HOME) —
+        # /tmp and other system dirs are now forbidden as bind targets.
+        self.hostdir = tempfile.mkdtemp(prefix="rattan-bind-host-",
+                                        dir=os.path.expanduser("~"))
 
     def tearDown(self):
         from rattan import layers

@@ -12,10 +12,19 @@ import os
 from dataclasses import dataclass, field
 
 
-# Host paths that must never be bound into the container (invariant #11).
-FORBIDDEN_HOST_DIRS = ("/etc", "/proc", "/sys")
-# Forbidden relative-to-$HOME dirs (including $HOME itself).
-FORBIDDEN_HOME_SUBDIRS = (".config", ".local", ".cache")
+# Host system directories that must never be bound into the container
+# (invariant #11). Binding any of these — even ``ro`` — exposes host system
+# state, device nodes, kernels, logs, or other users' data to the sandbox. The
+# intended bind target is a user project/data directory (e.g. under $HOME).
+FORBIDDEN_SYSTEM_DIRS = (
+    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64",
+    "/proc", "/root", "/run", "/sbin", "/sys", "/tmp", "/usr", "/var",
+    "/opt", "/srv", "/mnt", "/media",
+)
+# Hidden (dot) subdirectories under $HOME hold configuration and credentials
+# (.ssh, .gnupg, .aws, .kube, .config, .local, .cache, ...). Any `$HOME/.*`
+# subtree is forbidden — only non-hidden user data dirs under $HOME are bindable.
+FORBIDDEN_HOME_PREFIX = "."
 
 
 def _under(path: str, root: str) -> bool:
@@ -89,10 +98,13 @@ def _realpath(path: str) -> str:
 def validate_host_bind(host_path: str, mount_point: str, mode: str) -> HostBind:
     """Validate a host-dir bind request.
 
-    Uses a positive-allowlist / deny-list model (invariant #11): rejects the
-    host root, $HOME and its forbidden subdirs, the rattan data dir, and other
-    privileged host locations. Raises ``ValueError`` with a clear message on
-    any violation.
+    Only **user data directories** may be bound (invariant #11): a non-hidden
+    subdir under ``$HOME`` (e.g. ``~/projects/foo``). Everything else is
+    rejected — the host root, all system directories (``/etc /proc /sys /usr
+    /var /boot /dev /run /bin /lib /root /tmp /opt /srv ...``), another user's
+    home, ``$HOME`` itself and every hidden ``$HOME/.*`` subtree (config and
+    credentials), and the rattan data dir. Raises ``ValueError`` on any
+    violation.
     """
     if mode not in ("ro", "rw"):
         raise ValueError(f"mode must be 'ro' or 'rw', got {mode!r}")
@@ -120,28 +132,33 @@ def validate_host_bind(host_path: str, mount_point: str, mode: str) -> HostBind:
     if real == "/":
         raise ValueError("binding the host root '/' is forbidden (invariant #11)")
 
-    # Forbidden absolute dirs
-    for forbidden in FORBIDDEN_HOST_DIRS:
-        if _under(real, forbidden):
-            raise ValueError(
-                f"binding {forbidden!r} is forbidden (invariant #11)"
-            )
+    home = os.path.realpath(_expand_home("~")) if _expand_home("~") else ""
 
-    # Forbidden $HOME (and its subdirs). $HOME itself must never be bound.
-    home = _expand_home("~")
-    if home:
-        if _under(real, home):
-            # Not forbidden unless it's one of the protected subdirs...
-            if real == home:
+    # Path under the current user's $HOME -> user data. $HOME itself and any
+    # hidden ($HOME/.*) subtree (config/credentials) are forbidden; non-hidden
+    # subdirs (projects, code, data) are the intended bind targets.
+    if home and _under(real, home):
+        if real == home:
+            raise ValueError(
+                "binding $HOME itself is forbidden (invariant #11)"
+            )
+        rel = os.path.relpath(real, home)
+        first = rel.split(os.sep)[0]
+        if first.startswith(FORBIDDEN_HOME_PREFIX):
+            raise ValueError(
+                f"binding {first!r} under $HOME is forbidden (invariant #11)"
+            )
+    else:
+        # Not under $HOME: must not be a system directory or another user's home.
+        for sysdir in FORBIDDEN_SYSTEM_DIRS:
+            if _under(real, sysdir):
                 raise ValueError(
-                    "binding $HOME itself is forbidden (invariant #11)"
+                    f"binding {sysdir!r} is forbidden (invariant #11)"
                 )
-            for sub in FORBIDDEN_HOME_SUBDIRS:
-                cand = os.path.join(home, sub)
-                if _under(real, cand):
-                    raise ValueError(
-                        f"binding {sub!r} under $HOME is forbidden (invariant #11)"
-                    )
+        if _under(real, "/home"):
+            raise ValueError(
+                "binding another user's home is forbidden (invariant #11)"
+            )
 
     # Never bind the rattan data dir (sessions/layers/rootfs) — an agent could
     # poison meta.json or committed layers.

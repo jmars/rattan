@@ -98,10 +98,45 @@ class TestSecurityFixes(unittest.TestCase):
                 bind.validate_host_bind("/tmp", bad, "ro")
 
     def test_bind_allows_innocuous(self):
-        host = "/tmp"
-        b = bind.validate_host_bind(host, "/workspace/data", "ro")
-        self.assertIsInstance(b, bind.HostBind)
-        self.assertEqual(b.mount_point, "/workspace/data")
+        # A non-hidden user data dir under $HOME is the intended bind target.
+        home = os.path.expanduser("~")
+        d = tempfile.mkdtemp(prefix="rattan-allow-", dir=home)
+        try:
+            b = bind.validate_host_bind(d, "/workspace/data", "ro")
+            self.assertIsInstance(b, bind.HostBind)
+            self.assertEqual(b.mount_point, "/workspace/data")
+        finally:
+            os.rmdir(d)
+
+    def test_bind_rejects_system_dirs(self):
+        for p in ("/var", "/boot", "/dev", "/run", "/usr", "/bin",
+                  "/lib", "/opt", "/srv", "/root", "/tmp"):
+            with self.assertRaises(ValueError, msg=f"expected rejection of {p}"):
+                bind.validate_host_bind(p, "/workspace/x", "ro")
+
+    def test_bind_rejects_hidden_home_subdirs(self):
+        # Hidden $HOME subtrees hold credentials/config (.ssh, .gnupg, ...).
+        home = os.path.expanduser("~")
+        for sub in (".ssh", ".gnupg", ".config", ".local", ".cache", ".aws"):
+            cand = os.path.join(home, sub)
+            if not os.path.exists(cand):
+                continue  # can't test a nonexistent dir
+            with self.assertRaises(ValueError, msg=f"expected rejection of {sub}"):
+                bind.validate_host_bind(cand, "/workspace/x", "ro")
+
+    def test_bind_rejects_other_users_home(self):
+        # /home/<someone-else> (that isn't our $HOME) must be rejected.
+        if os.path.expanduser("~") == "/root":
+            self.skipTest("running as root; no /home to test against")
+        if not os.path.isdir("/home"):
+            self.skipTest("no /home on this system")
+        for name in ("other", "nobody"):
+            cand = os.path.join("/home", name)
+            if os.path.exists(cand) and os.path.realpath(cand) != os.path.realpath(
+                os.path.expanduser("~")
+            ):
+                with self.assertRaises(ValueError):
+                    bind.validate_host_bind(cand, "/workspace/x", "ro")
 
     # -- pacman_run allowlist (H-1) -----------------------------------------
 

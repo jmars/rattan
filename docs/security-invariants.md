@@ -51,8 +51,12 @@ for the source design.
     `setns`, `mount`, `pivot_root`, `umount2`, `reboot`. Tested by
     `tests/test_stage3.py` (keyctl/ptrace/mount/unshare denial probes).
 
-11. **Bind-source path validation rejects `$HOME`, `~/.config`, `~/.local`,
-    `~/.cache`, `/etc`, `/proc`, `/sys`, and any non-directory.** Tested by
+11. **Bind-source path validation rejects everything except user data dirs.**
+    Only a non-hidden subdir under `$HOME` (e.g. `~/projects/foo`) can be bound.
+    Rejected: `/`, all system dirs (`/etc /proc /sys /usr /var /boot /dev /run
+    /bin /lib /root /tmp /opt /srv /mnt /media`), another user's home, `$HOME`
+    itself and every hidden `$HOME/.*` subtree (`.ssh`, `.config`, `.local`,
+    `.cache`, ...), the rattan data dir, and any non-directory. Tested by
     `tests/test_invariants.py::TestInvariant8_TrustedPaths` and the
     `bind_host_dir` tool (fuzzable via malicious paths).
 
