@@ -268,15 +268,33 @@ class TestDefaultBinds(unittest.TestCase):
 
     def test_parse_default_binds(self):
         from rattan.server import _parse_default_binds
+        # no suffix -> rw (--bind default)
         self.assertEqual(
             _parse_default_binds(["--bind", "~/projects=/workspace/projects"]),
             [("~/projects", "/workspace/projects", "rw")],
         )
+        # :ro / :rw suffix overrides the default
+        self.assertEqual(
+            _parse_default_binds(["--bind", "/data=/mnt/data:ro"]),
+            [("/data", "/mnt/data", "ro")],
+        )
+        self.assertEqual(
+            _parse_default_binds(["--bind", "/data=/mnt/data:rw"]),
+            [("/data", "/mnt/data", "rw")],
+        )
+        # --bind-ro without suffix -> ro
+        self.assertEqual(
+            _parse_default_binds(["--bind-ro", "/x=/mnt/x"]),
+            [("/x", "/mnt/x", "ro")],
+        )
+        # mixed, repeatable
         self.assertEqual(
             _parse_default_binds(
-                ["--bind-ro", "/x=/mnt/x", "--bind", "/y=/mnt/y"]
+                ["--bind", "/a=/mnt/a", "--bind", "/b=/mnt/b:ro",
+                 "--bind-ro", "/c=/mnt/c"]
             ),
-            [("/x", "/mnt/x", "ro"), ("/y", "/mnt/y", "rw")],
+            [("/a", "/mnt/a", "rw"), ("/b", "/mnt/b", "ro"),
+             ("/c", "/mnt/c", "ro")],
         )
         self.assertEqual(_parse_default_binds(["--probe"]), [])
         with self.assertRaises(ValueError):

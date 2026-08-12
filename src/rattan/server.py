@@ -466,23 +466,35 @@ def _build_tools(fastmcp: FastMCP):
 
 
 def _parse_default_binds(argv: list[str]) -> list[tuple[str, str, str]]:
-    """Parse ``--bind HOST=MOUNT`` / ``--bind-ro HOST=MOUNT`` into ``(host, mount, mode)``.
+    """Parse ``--bind HOST=MOUNT[:ro|rw]`` into ``(host, mount, mode)``.
 
-    ``--bind`` mounts read-write; ``--bind-ro`` read-only. Both repeatable.
-    Raises ``ValueError`` on a missing argument or malformed spec.
+    ``--bind`` defaults to read-write; an optional ``:ro``/``:rw`` suffix on the
+    mount overrides it. ``--bind-ro HOST=MOUNT`` (no suffix) is an alias for
+    ``--bind HOST=MOUNT:ro``. Both repeatable. The mount path is validated later
+    to reject ``:``, so splitting the mode off the last ``:ro``/``:rw`` suffix is
+    unambiguous. Raises ``ValueError`` on a missing argument or malformed spec.
     """
     binds: list[tuple[str, str, str]] = []
     i = 0
     while i < len(argv):
         a = argv[i]
         if a in ("--bind", "--bind-ro"):
-            mode = "rw" if a == "--bind" else "ro"
+            default_mode = "rw" if a == "--bind" else "ro"
             if i + 1 >= len(argv):
-                raise ValueError(f"{a} requires an argument (HOST=MOUNT)")
+                raise ValueError(f"{a} requires an argument (HOST=MOUNT[:ro|rw])")
             spec = argv[i + 1]
             if "=" not in spec:
-                raise ValueError(f"{a} expects HOST=MOUNT, got {spec!r}")
-            host, mount = spec.split("=", 1)
+                raise ValueError(
+                    f"{a} expects HOST=MOUNT[:ro|rw], got {spec!r}"
+                )
+            host, mount_mode = spec.split("=", 1)
+            mode = default_mode
+            if mount_mode.endswith(":ro"):
+                mode, mount = "ro", mount_mode[:-3]
+            elif mount_mode.endswith(":rw"):
+                mode, mount = "rw", mount_mode[:-3]
+            else:
+                mount = mount_mode
             binds.append((host, mount, mode))
             i += 2
         else:
