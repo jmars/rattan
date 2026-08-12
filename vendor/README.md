@@ -19,6 +19,16 @@ Pinned HTTPS mirror list used during bootstrap. Matched to the 2026.08.01
 release snapshot. Never used for runtime provisioning (M4 uses its own
 validated mirror list).
 
+## rootfs-extra
+
+Static files copied verbatim into the base rootfs during bootstrap (before the
+manifest is written and the base is made read-only). Anything here is baked into
+the immutable base and present in every session.
+
+- Put prebuilt/non-pacman artifacts here, e.g. `rootfs-extra/usr/local/bin/mytool`.
+- Mirrors the base rootfs layout (`rootfs-extra/etc/...` → `<base>/etc/...`).
+- `.gitkeep` keeps the directory in git; delete it once you add a real file.
+
 ## Updating
 
 1. Download the new `archlinux-bootstrap-x86_64.tar.zst` and its
