@@ -57,6 +57,31 @@ re-bootstraps if the base has drifted.
 - Manifest: `~/.local/share/rattan/rootfs/base/MANIFEST.sha256`
 - Override the data dir with `RATTAN_DATA_DIR=/some/other/path`.
 
+## Personal rootfs config (external)
+
+You can extend the base rootfs **without forking the repo**. `bootstrap-rootfs.sh`
+sources an optional external config file (default `$HOME/.config/rattan/rootfs.env`,
+override with `RATTAN_ROOTFS_CONFIG`), which may set:
+
+- `ROOTFS_EXTRA_PACKAGES` — extra pacman packages (space-separated) installed
+  alongside `base`. Example: `ROOTFS_EXTRA_PACKAGES="base-devel git musl mcpp"`.
+- `ROOTFS_EXTRA_DIRS` — extra directories copied verbatim into the base, in
+  addition to `vendor/rootfs-extra/`. Useful for a prebuilt binary that isn't a
+  pacman package (e.g. souffle, which is AUR-only). The directory layout mirrors
+  the base rootfs, e.g. `~/rattan-rootfs-extra/usr/local/bin/souffle` →
+  `<base>/usr/local/bin/souffle`.
+
+Example config (`~/.config/rattan/rootfs.env`):
+
+```sh
+ROOTFS_EXTRA_PACKAGES="base-devel git musl mcpp"
+ROOTFS_EXTRA_DIRS="$HOME/rattan-rootfs-extra"
+```
+
+The config file is **sourced** by the bootstrap script and runs on your own host,
+so keep it trusted. Files from these dirs are included in `MANIFEST.sha256` and
+locked read-only like the rest of the base.
+
 ## Adding non-pacman files (`vendor/rootfs-extra`)
 
 The base rootfs is built from pacman packages plus anything under
