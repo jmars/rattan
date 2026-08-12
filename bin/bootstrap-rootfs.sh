@@ -103,6 +103,20 @@ bwrap \
         echo "→ Bootstrap install complete."
     ' || die "bwrap bootstrap failed."
 
+# === Add the sandbox user (uid 1000) =========================================
+# Agent commands run as uid/gid 1000 inside a user namespace. The Arch base
+# rootfs ships no account with that uid, so `whoami`/`id`/`getpwuid` fail with
+# "cannot find name for user ID 1000". Add a `user` account (home /workspace,
+# shell bash) and a matching group so identity lookups work. Append (do not
+# overwrite) so the base package accounts are preserved.
+if ! grep -q '^user:' "$BASE/etc/passwd"; then
+    printf 'user:x:1000:1000:rattan sandbox user:/workspace:/usr/bin/bash\n' \
+        >> "$BASE/etc/passwd"
+fi
+if ! grep -q '^user:' "$BASE/etc/group"; then
+    printf 'user:x:1000:\n' >> "$BASE/etc/group"
+fi
+
 # === Install custom non-pacman files (vendor/rootfs-extra) ====================
 # Any tree under vendor/rootfs-extra is copied verbatim into the base rootfs.
 # Place static artifacts (e.g. a prebuilt binary under usr/local/bin) here so

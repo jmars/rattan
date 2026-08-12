@@ -43,9 +43,12 @@ re-bootstraps if the base has drifted.
    - `pacman-key --populate archlinux`
    - `pacman -Sy`
    - `pacman -S --needed base`
-4. **Install custom files** from `vendor/rootfs-extra/` (verbatim copy into the base).
-5. **Immutable**: `chmod -R a-w <base>`.
-6. **Write** `MANIFEST.sha256` (one sha256 line per file, relative to base).
+5. **Add the sandbox user** (uid/gid 1000, home `/workspace`, shell bash) to
+   `etc/passwd` and `etc/group` — otherwise `whoami`/`id` fail with
+   "cannot find name for user ID 1000".
+6. **Install custom files** from `vendor/rootfs-extra/` (verbatim copy into the base).
+7. **Immutable**: `chmod -R a-w <base>`.
+8. **Write** `MANIFEST.sha256` (one sha256 line per file, relative to base).
 
 ## Where files land
 
