@@ -19,7 +19,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from rattan import capabilities, config, layers, pacman, sessions
+from rattan import capabilities, config, layers, pacman, policy, sessions
 from rattan.executor import InvocationError, EmptyInvocation, execute_program
 from rattan.overlay import provision
 from rattan.parser import parse, ParseError
@@ -589,6 +589,12 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if "--probe" in args:
         return capabilities.cli_main(args)
+
+    # --exec-workspace-tmp: grant the Landlock execute (`x`) bit for binaries
+    # in /workspace and /tmp, so the agent can exec binaries it places there.
+    # Default OFF; must be set before tools are built / any command runs.
+    if "--exec-workspace-tmp" in args:
+        policy.set_exec_workspace_tmp(True)
 
     _startup_gate()
     _setup_shutdown()

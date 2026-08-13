@@ -30,6 +30,33 @@ AGENT_BASELINE_LANDLOCK = (
     "/proc:r;/etc:r;/dev:rwc"
 )
 
+# Whether the agent may EXECUTE binaries in /workspace and /tmp (Landlock
+# `x` bit). Deliberately OFF by default: it relaxes Landlock to allow exec of
+# any writable binary in those dirs. Set via set_exec_workspace_tmp().
+_EXEC_WORKSPACE_TMP = False
+
+
+def set_exec_workspace_tmp(enabled: bool) -> None:
+    """Enable/disable the Landlock execute bit in /workspace and /tmp."""
+    global _EXEC_WORKSPACE_TMP
+    _EXEC_WORKSPACE_TMP = enabled
+
+
+def agent_baseline_landlock() -> str:
+    """Return the agent baseline Landlock spec.
+
+    When ``_EXEC_WORKSPACE_TMP`` is set, the ``/workspace:rwc`` and ``/tmp:rwc``
+    entries gain the ``x`` permission bit (``rwcx``). Otherwise the shared
+    ``AGENT_BASELINE_LANDLOCK`` constant is returned unchanged.
+    """
+    if not _EXEC_WORKSPACE_TMP:
+        return AGENT_BASELINE_LANDLOCK
+    return (
+        AGENT_BASELINE_LANDLOCK
+        .replace("/workspace:rwc", "/workspace:rwcx")
+        .replace("/tmp:rwc", "/tmp:rwcx")
+    )
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -61,8 +88,8 @@ class ResolvedPolicy:
     def full_landlock_spec(self) -> str:
         """Return the landlock spec with baseline pre-pended."""
         if self.landlock_spec:
-            return AGENT_BASELINE_LANDLOCK + ";" + self.landlock_spec
-        return AGENT_BASELINE_LANDLOCK
+            return agent_baseline_landlock() + ";" + self.landlock_spec
+        return agent_baseline_landlock()
 
 
 # ---------------------------------------------------------------------------
