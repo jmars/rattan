@@ -139,6 +139,12 @@ Re-running `make bootstrap-rootfs` is safe:
 | `Disk full` | insufficient space | free ~2 GB under the data dir |
 | startup: `Base rootfs not bootstrapped` | never bootstrapped | `make bootstrap-rootfs` |
 | startup: `integrity check FAILED` | base drifted / corrupted | `make bootstrap-rootfs` |
+| suspect silent drift (deletion / `touch -r`) | startup uses the cheap mtime fast path | re-verify with `RATTAN_VERIFY_BASE=1 make test` or run `make bootstrap-rootfs` |
+
+> **`RATTAN_VERIFY_BASE`:** startup validates the base rootfs with a cheap
+> mtime fast path by default (it misses pure deletions and mtime-preserving
+> tampering). Set `RATTAN_VERIFY_BASE=1` to force the full `sha256sum -c`
+> verification — e.g. when you suspect the base has silently drifted.
 
 > **pacman sandbox in userns:** pacman ≥ 7.0 ships a download sandbox that
 > `chown`s the temp download dir to `alpm` and drops privileges via

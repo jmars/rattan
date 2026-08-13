@@ -77,6 +77,17 @@ class FastManifestCheckTest(unittest.TestCase):
         ):
             self.assertIsNone(config._fast_manifest_check(fake_base, manifest))
 
+    def test_timeout_returns_none(self):
+        """find timeout (TimeoutExpired) -> None (caller falls through)."""
+        cleanup, fake_base = _make_fake_base()
+        self.addCleanup(cleanup)
+        manifest = os.path.join(fake_base, "MANIFEST.sha256")
+        with mock.patch.object(
+            config.subprocess, "run",
+            side_effect=subprocess.TimeoutExpired(cmd=["find"], timeout=30),
+        ):
+            self.assertIsNone(config._fast_manifest_check(fake_base, manifest))
+
 
 class FullManifestCheckTest(unittest.TestCase):
     """Unit tests for ``config._full_manifest_check`` — mocked subprocess."""
@@ -172,6 +183,24 @@ class ManifestValidationTest(unittest.TestCase):
         m_run.assert_called_once()
         cmd = m_run.call_args.args[0]
         self.assertEqual(cmd[0], "find")
+
+    def test_verify_env_other_values_do_not_force_full(self):
+        """RATTAN_VERIFY_BASE set to non-'1' still uses the fast path."""
+        for value in ("0", "true", "", "on"):
+            cleanup, fake_base = _make_fake_base()
+            self.addCleanup(cleanup)
+            with mock.patch.dict(os.environ, {"RATTAN_VERIFY_BASE": value}), \
+                 mock.patch.object(config, "base_rootfs_path",
+                                   return_value=fake_base), \
+                 mock.patch.object(
+                     config.subprocess, "run",
+                     return_value=mock.Mock(returncode=0, stdout="", stderr=""),
+                 ) as m_run:
+                config.validate_base_manifest()  # no raise
+            # Exactly one subprocess call: the find fast path, not sha256sum.
+            m_run.assert_called_once()
+            cmd = m_run.call_args.args[0]
+            self.assertEqual(cmd[0], "find", f"value={value!r}")
 
     def test_fast_false_falls_to_full(self):
         """Fast path False (drift hint) -> full hash runs and passes."""
