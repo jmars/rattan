@@ -815,6 +815,7 @@ static const uint16_t kPledgeFattr[] = {
     __NR_linux_futimesat,          //
 #endif                             //
     __NR_linux_utimensat,          //
+    __NR_linux_fallocate,          // rattan: cp/mv sparse deallocate
 };
 
 static const uint16_t kPledgeInet[] = {

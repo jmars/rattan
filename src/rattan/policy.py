@@ -166,6 +166,20 @@ POLICY_TABLE: dict[str, CommandPolicy] = {
         extra_promises="prot_exec",
         extra_landlock="",
     ),
+    # cosmocc toolchain (Cosmopolitan C/C++ compiler). Needs fattr for its
+    # cp/mv/utimensat file-timestamp preservation and sparse deallocation.
+    "cosmocc": CommandPolicy(
+        extra_promises="fattr",
+        extra_landlock="",
+    ),
+    "cosmoc++": CommandPolicy(
+        extra_promises="fattr",
+        extra_landlock="",
+    ),
+    "assimilate": CommandPolicy(
+        extra_promises="fattr",
+        extra_landlock="",
+    ),
 }
 
 
