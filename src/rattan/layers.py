@@ -75,6 +75,10 @@ class Session:
         return os.path.join(self.upper, "workspace")
 
     @property
+    def tmp(self) -> str:
+        return os.path.join(self.upper, "tmp")
+
+    @property
     def lock_path(self) -> str:
         return os.path.join(self.root, "lock")
 
@@ -310,8 +314,10 @@ def create_session(sid: Optional[str] = None) -> Session:
     upper = os.path.join(root, "upper")
     work = os.path.join(root, "work")
     workspace = os.path.join(upper, "workspace")
+    tmpdir = os.path.join(upper, "tmp")
 
     os.makedirs(workspace, exist_ok=True)
+    os.makedirs(tmpdir, exist_ok=True)
     os.makedirs(work, exist_ok=True)
 
     session = Session(sid=sid, root=root, upper=upper, work=work, stack=[])
@@ -440,7 +446,7 @@ def commit(session: Session, message: str = "") -> LayerRef:
 
     # Wipe upper, recreate workspace
     _wipe_upper(session)
-    _ensure_workspace(session)
+    _ensure_seeds(session)
 
     return LayerRef(
         commit_id=commit_id,
@@ -476,8 +482,15 @@ def _rmtree_force(path: str):
             continue
 
 
-def _ensure_workspace(session: Session):
+def _ensure_seeds(session: Session):
+    """Recreate the writable session seed dirs (workspace/ + tmp/).
+
+    The base rootfs is ``chmod -R a-w``, so its ``/workspace`` and ``/tmp`` are
+    read-only. A fresh upper must seed writable copies of both so the overlay
+    exposes them as writable container dirs (writes land in the upper).
+    """
     os.makedirs(session.workspace, exist_ok=True)
+    os.makedirs(session.tmp, exist_ok=True)
 
 
 def rollback(session: Session, to_commit_id: str):
@@ -504,7 +517,7 @@ def rollback(session: Session, to_commit_id: str):
         _save_index(index, lock=lf)
 
     _wipe_upper(session)
-    _ensure_workspace(session)
+    _ensure_seeds(session)
     _persist_meta(session)
 
 
@@ -514,7 +527,7 @@ def reset(session: Session):
     if os.path.exists(session.work):
         _rmtree_force(session.work)
     os.makedirs(session.work, exist_ok=True)
-    _ensure_workspace(session)
+    _ensure_seeds(session)
 
 
 def destroy(session: Session):

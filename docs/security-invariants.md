@@ -72,7 +72,7 @@ for the source design.
 |---|---|
 | **Landlock union-within-layer** (rules union; can't subtract) | Agent landlock rules govern container-internal paths (`/workspace`, `/tmp`), not host paths under a writable ancestor. |
 | **Nested pledge inheritance** (seccomp BPF AND-inherits; landlock domains intersect) | Background jobs spawn as raw bwrap subprocesses (not inside an already-pledged parent); the MCP server is never pledged. |
-| **overlayfs upperdir on tmpfs → OOM** under pacman churn | Upperdir on disk by default; tmpfs only for `/tmp` inside the container. |
+| **overlayfs upperdir on tmpfs → OOM** under pacman churn | Upperdir on disk by default (never tmpfs). |
 | **bwrap + userns kernel config** | Probe at startup; refuse if `kernel.unprivileged_userns_clone=0`. |
 | **Landlock ABI drift** | Probe abi; mask handled set; log loudly if abi < 3. |
 | **pacman download sandbox breaks in userns** | `bin/bootstrap-rootfs.sh` disables `DownloadUser`/sandbox in the base `pacman.conf`. |

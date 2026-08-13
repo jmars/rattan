@@ -116,7 +116,7 @@ Outermost → innermost. **No privileged window where user code runs.**
 │   --overlay-src <base-rootfs>        ← immutable lower[0]       │
 │   --overlay-src <layer-1> ...        ← committed layers (bottom)│
 │   --overlay <upper> <work> /         ← writable overlay at /    │
-│   --proc /proc --tmpfs /tmp --dev /dev                          │
+│   --proc /proc --dev /dev                                       │
 │   --ro-bind <stage3-binary> /init                                │
 │   -- /init PROMISES LANDLOCK_SPEC -- <user-cmd> <args>           │
 │                                                                  │
@@ -165,7 +165,8 @@ bwrap builds the visible filesystem before exec'ing `/init`:
 - `/` = overlay(base + committed-layers, upperdir, workdir) — pacman-installed
   files appear here; writes land in the session upperdir
 - `/proc`, `/dev`, `/dev/pts` (for tty), `/sys` (read-only) — bound by bwrap
-- `/tmp` = tmpfs inside the container (private per command)
+- `/tmp` = part of the session overlay upperdir (persists across commands;
+  writes captured by commit)
 - `/workspace` = a directory inside the session upperdir (seeded empty at session
   creation); part of the overlay, so writes there are captured by commit. Explicit
   host-dir binds arrive in M5 (`bind_host_dir`).
