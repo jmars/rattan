@@ -50,7 +50,6 @@ def agent_argv(
         # Runtime mounts
         "--proc", "/proc",
         "--dev", "/dev",
-        "--tmpfs", "/tmp",
     ]
     # Session host binds (from bind_host_dir)
     if extra_binds:
@@ -110,7 +109,6 @@ def provisioning_argv(
         # Runtime mounts
         "--proc", "/proc",
         "--dev", "/dev",  # provides /dev/urandom (needed by pacman-key / gpg)
-        "--tmpfs", "/tmp",
         # DNS: bind the host's resolv.conf (the base stub doesn't resolve)
         "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
     ]

@@ -66,8 +66,13 @@ class TestBwrapAgentArgv(unittest.TestCase):
         self.assertIn("/proc", argv)
         self.assertIn("--dev", argv)
         self.assertIn("/dev", argv)
-        self.assertIn("--tmpfs", argv)
-        self.assertIn("/tmp", argv)
+        # /tmp is now overlay-backed (no ephemeral tmpfs); it remains referenced
+        # via the Landlock spec string (one argv element containing /tmp:rwc).
+        self.assertNotIn("--tmpfs", argv)
+        self.assertTrue(
+            any("/tmp:rwc" in a for a in argv),
+            "Landlock spec should still grant /tmp:rwc",
+        )
         # Stage3
         self.assertIn("--ro-bind", argv)
         self.assertIn("/repo/bin/stage3", argv)
