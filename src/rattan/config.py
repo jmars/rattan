@@ -63,20 +63,8 @@ def base_rootfs_path():
     return os.path.join(data_dir(), "rootfs", "base")
 
 
-def validate_base_manifest():
-    """Verify the base rootfs ``MANIFEST.sha256``; raise RuntimeError on drift.
-
-    Called at server startup (after the capability gate, before MCP
-    registration). If the manifest is missing, reports that bootstrap is needed.
-    If it fails validation, refuses to start and lists the drifted files.
-    """
-    base = base_rootfs_path()
-    manifest = os.path.join(base, "MANIFEST.sha256")
-    if not os.path.exists(manifest):
-        raise RuntimeError(
-            "Base rootfs not bootstrapped.\n"
-            "Run: make bootstrap-rootfs"
-        )
+def _full_manifest_check(base, manifest):
+    """Full ``sha256sum -c`` over the manifest; raise RuntimeError on drift."""
     try:
         result = subprocess.run(
             ["sha256sum", "-c", manifest, "--quiet"],
@@ -96,6 +84,61 @@ def validate_base_manifest():
             msg += "\n  ... (truncated)"
         msg += "\n\nRe-run: make bootstrap-rootfs"
         raise RuntimeError(msg)
+
+
+def _fast_manifest_check(base, manifest):
+    """Cheap mtime fast path: ``find . -type f -newer MANIFEST.sha256``.
+
+    Bootstrap writes MANIFEST.sha256 last (before ``chmod -R a-w``), so its
+    mtime is >= every regular file's mtime. Any regular file with a *newer*
+    mtime therefore implies a post-bootstrap change.
+
+    Returns True when no regular file is newer than the manifest (base
+    unchanged); False when some file is newer (possible drift); None when the
+    fast path could not run (find missing / non-zero exit / timeout) and the
+    caller must fall through to the full hash check.
+    """
+    try:
+        result = subprocess.run(
+            ["find", ".", "-type", "f", "-newer", "MANIFEST.sha256",
+             "-print", "-quit"],
+            cwd=base,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return not bool(result.stdout.strip())
+
+
+def validate_base_manifest():
+    """Verify the base rootfs ``MANIFEST.sha256``; raise RuntimeError on drift.
+
+    Called at server startup. If the manifest is missing, reports that
+    bootstrap is needed.
+
+    Default fast path: ``find -type f -newer MANIFEST.sha256`` — cheap, catches
+    file additions and mtime-bumping edits, but NOT pure deletions or
+    mtime-preserving tampering. Set ``RATTAN_VERIFY_BASE=1`` to force the full
+    ``sha256sum -c``. Any fast-path miss or failure falls through to the full
+    hash check, so errors are never silently skipped.
+    """
+    base = base_rootfs_path()
+    manifest = os.path.join(base, "MANIFEST.sha256")
+    if not os.path.exists(manifest):
+        raise RuntimeError(
+            "Base rootfs not bootstrapped.\n"
+            "Run: make bootstrap-rootfs"
+        )
+    if os.environ.get("RATTAN_VERIFY_BASE") == "1":
+        _full_manifest_check(base, manifest)
+        return
+    if _fast_manifest_check(base, manifest) is True:
+        return
+    _full_manifest_check(base, manifest)
 
 
 # Marker file inside a session root recording that the provisioning seed has
