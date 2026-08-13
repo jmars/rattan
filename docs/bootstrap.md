@@ -96,9 +96,10 @@ vendor/rootfs-extra/usr/local/bin/mytool   →  <base>/usr/local/bin/mytool
 vendor/rootfs-extra/etc/motd               →  <base>/etc/motd
 ```
 
-These files are included in `MANIFEST.sha256` (integrity-checked at startup) and
-are immutable, so the agent can execute but never modify them (they live in the
-read-only overlay lower layer).
+These files are included in `MANIFEST.sha256` (integrity-checked at startup —
+mtime fast path by default, full `sha256sum` verification when
+`RATTAN_VERIFY_BASE=1` is set) and are immutable, so the agent can execute but
+never modify them (they live in the read-only overlay lower layer).
 
 To apply after a change:
 

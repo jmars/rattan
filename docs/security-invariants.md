@@ -41,7 +41,8 @@ for the source design.
    `tests/test_pacman.py::TestMirrorValidation` (mirror allowlist).
 
 9. **The base rootfs lower layer is never writable.** Bind RO + `chmod -R a-w` +
-   manifest hash check at startup. Tested by
+   manifest integrity check at startup (mtime fast path by default; set
+   `RATTAN_VERIFY_BASE=1` for a full sha256 verification). Tested by
    `tests/test_invariants.py::TestInvariant9_BaseNeverWritable`,
    `tests/test_bootstrap.py` (manifest validation), and
    `config.validate_base_manifest()` (startup gate).
