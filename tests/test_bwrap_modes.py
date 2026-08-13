@@ -153,5 +153,44 @@ class TestBwrapAgentArgv(unittest.TestCase):
             self.assertIn(r, spec, f"{r!r} should be in AGENT_BASELINE_LANDLOCK")
 
 
+class TestExecWorkspaceTmp(unittest.TestCase):
+    """Verify the --exec-workspace-tmp flag toggles the Landlock `x` bit."""
+
+    def setUp(self):
+        # Ensure a clean baseline regardless of prior test state.
+        policy.set_exec_workspace_tmp(False)
+
+    def tearDown(self):
+        # Restore the default so other tests are unaffected.
+        policy.set_exec_workspace_tmp(False)
+
+    def _resolved(self) -> policy.ResolvedPolicy:
+        return policy.ResolvedPolicy(
+            promises=policy.AGENT_BASELINE_PROMISES,
+            landlock_spec="",
+            rlimits="",
+            allow_ptrace=False,
+        )
+
+    def test_exec_enabled(self):
+        policy.set_exec_workspace_tmp(True)
+        spec = self._resolved().full_landlock_spec
+        self.assertIn("/workspace:rwcx", spec)
+        self.assertIn("/tmp:rwcx", spec)
+        # The baseline constant itself is untouched.
+        self.assertNotIn("rwcx", policy.AGENT_BASELINE_LANDLOCK)
+
+    def test_exec_disabled_by_default(self):
+        policy.set_exec_workspace_tmp(False)
+        spec = self._resolved().full_landlock_spec
+        self.assertIn("/workspace:rwc", spec)
+        self.assertIn("/tmp:rwc", spec)
+        self.assertNotIn("rwcx", spec)
+
+    def test_helper_returns_constant_when_disabled(self):
+        policy.set_exec_workspace_tmp(False)
+        self.assertEqual(policy.agent_baseline_landlock(), policy.AGENT_BASELINE_LANDLOCK)
+
+
 if __name__ == "__main__":
     unittest.main()
