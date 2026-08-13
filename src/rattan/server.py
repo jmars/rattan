@@ -461,6 +461,87 @@ def _build_tools(fastmcp: FastMCP):
             pass
         return sorted(set(names))
 
+    # ---- Sandboxed file tools --------------------------------------------
+
+    @fastmcp.tool(
+        description=(
+            "Read a file from the rattan sandbox. Paths are CONTAINER paths "
+            "under /workspace or /tmp (NOT host paths). With --bind-cwd, "
+            "/workspace maps to the host launch directory. Returns "
+            "ReadFileResult-shaped dict."
+        )
+    )
+    def read_file(file_path: str, offset: int | None = None, limit: int = 2000) -> dict:
+        from rattan import filetools
+        nonlocal session
+        if session is None:
+            session = sessions.get_or_create()
+            provision(session)
+        return filetools.read_file(session, file_path, offset=offset, limit=limit)
+
+    @fastmcp.tool(
+        description=(
+            "Write a NEW file in the rattan sandbox (fails if it already "
+            "exists; use rattan_edit to modify). Paths are CONTAINER paths "
+            "under /workspace or /tmp (NOT host paths). Parent directories are "
+            "created as needed."
+        )
+    )
+    def write_file(file_path: str, content: str) -> dict:
+        from rattan import filetools
+        nonlocal session
+        if session is None:
+            session = sessions.get_or_create()
+            provision(session)
+        return filetools.write_file(session, file_path, content)
+
+    @fastmcp.tool(
+        description=(
+            "Replace a string in a file in the rattan sandbox (atomic). Paths "
+            "are CONTAINER paths under /workspace or /tmp (NOT host paths). "
+            "Rejects empty old_string, old_string==new_string, and NUL bytes in "
+            "new_string. Set replace_all=True to replace all occurrences."
+        )
+    )
+    def edit(
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> dict:
+        from rattan import filetools
+        nonlocal session
+        if session is None:
+            session = sessions.get_or_create()
+            provision(session)
+        return filetools.edit(
+            session, file_path, old_string, new_string, replace_all=replace_all
+        )
+
+    @fastmcp.tool(
+        description=(
+            "Search for a regex pattern in the rattan sandbox. Paths are "
+            "CONTAINER paths under /workspace or /tmp (NOT host paths). "
+            "use_default_ignore is accepted for API compatibility but not "
+            "implementable with plain grep; only hardcoded excludes apply."
+        )
+    )
+    def grep(
+        pattern: str,
+        path: str = "/workspace",
+        max_matches: int | None = None,
+        use_default_ignore: bool = True,
+    ) -> dict:
+        from rattan import filetools
+        nonlocal session
+        if session is None:
+            session = sessions.get_or_create()
+            provision(session)
+        return filetools.grep(
+            session, pattern, path=path, max_matches=max_matches,
+            use_default_ignore=use_default_ignore,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Main entry
