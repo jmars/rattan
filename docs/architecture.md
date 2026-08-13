@@ -371,6 +371,42 @@ New (host bind):
   - `mode="rw"` requires the same path to be in the landlock RW set for the
     command.
 
+#### Deferred (not v1): making commit/rollback version bound host dirs
+
+`env_commit`/`env_rollback`/`env_reset`/`env_discard` snapshot and restore
+**only the session overlay upperdir**. A bound host dir is **live write-through**:
+writes go straight to the host (via `--bind`/`--ro-bind`) and are deliberately
+*outside* the layer stack — never captured by commit, never reverted by
+rollback/reset.
+
+We considered extending the layer stack to *version* bound host dirs (a
+git-worktree-like model: `commit` snapshots a bound dir into a layer,
+`rollback`/`discard` restore it destructively). It was **rejected for v1 as
+needless complexity**; reconsider if a concrete need appears. The design
+tensions that made it expensive, for the record:
+
+- **Restore is destructive to the host.** `rollback`/`discard` would rsync an
+  older snapshot over a *live* host directory (data-loss risk the user must
+  explicitly accept), and could race a concurrent commit from another session
+  (needs a persisted per-session rw-ownership table + lock discipline).
+- **Dual-source content-addressing.** `commit_id` must hash the upper *and*
+  every bound rw host dir's tree deterministically (sorted walk, same
+  mode/type/sha256 format), and must not dedupe two sessions that bind the same
+  host dir to different mount_points.
+- **Restore cannot use the overlay.** A bound host dir is a lower-level live
+  bind that *shadows* the overlay at its mount_point, so rollback can't rely on
+  overlay layering; it must rsync the layer's copy back to the host explicitly.
+- **Import-COW was also rejected** (host never written, explicit `bind_publish`
+  to write back): the export footgun (agents won't call publish) and the slow
+  full-tree copy at bind time made it a worse fit than live write-through.
+
+If this is ever pursued, revisit the three candidate models — (1) live
+write-through + destructive versioning (above), (2) import-COW into the upper
+with `bind_publish`, (3) read-only overlay-lower shim (requires a bind-mount
+shim in a mount namespace; unprivileged but heavier) — and pick based on
+whether host-dir changes must reach the host *automatically* (1) or never touch
+it (2/3).
+
 ---
 
 ## 6. Module / file layout + runtime deps
@@ -480,6 +516,11 @@ The "what must never be true." Each is enforceable and testable.
    shares net.
 8. **Trusted paths are never widened by client input.** All bind sources, env
    vars, and policy decisions come from the MCP server's controlled surface.
+   The sandboxed file tools (`rattan_read_file`/`rattan_write_file`/`rattan_edit`/
+   `rattan_grep`) extend this: they accept container paths under `/workspace` or
+   `/tmp` only, validated lexically on the host **and** re-resolved inside the
+   sandbox (via `realpath`) so a container-side symlink pointing outside the roots
+   (e.g. `/workspace/evil -> /etc/passwd`) is rejected before any read/write.
 9. **The base rootfs lower layer is never writable.** Bind RO + `chmod -R a-w` +
    manifest hash check at startup.
 10. **Stage3 blocks post-setup privileged syscalls.** Seccomp denies `keyctl`,

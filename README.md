@@ -6,7 +6,14 @@ changes are discarded unless you call `env_commit`.
 
 Implemented: host capability probe, a C `stage3` inner binary (no_new_privs →
 Landlock → seccomp), a bootstrapped Arch rootfs with pacman, content-addressed
-overlay commits, and 18 MCP tools.
+overlay commits, and 22 MCP tools.
+
+The server exposes sandboxed file tools — `rattan_read_file`, `rattan_write_file`,
+`rattan_edit`, `rattan_grep` — that mirror Vibe's host-side file tools but operate
+**inside** the sandbox. They accept **container paths only** (under `/workspace` or
+`/tmp`); host paths are rejected loudly. With `--bind-cwd`, `/workspace` maps to
+the host launch directory, so sandboxed writes land in the real project. These
+let subagents do file I/O without Vibe's host-touching tools.
 
 ```
 ┌───────────────┐   stdio    ┌────────────────────────────────────────────┐
