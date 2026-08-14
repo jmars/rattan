@@ -98,6 +98,68 @@ def _setup_shutdown():
 
 
 # ---------------------------------------------------------------------------
+# shell_list installed-package cache
+# ---------------------------------------------------------------------------
+
+# ``pacman -Qq`` runs a full bwrap+overlay+pacman subprocess (~30-50ms) on
+# every ``shell_list`` call. Cache the parsed installed-package list per
+# session for a short TTL so repeated listings are near-free; invalidate on
+# every state-mutating tool (install/commit/reset/rollback) so the list can
+# never go stale across a mutation.
+_SHELL_LIST_TTL = 30.0
+_shell_list_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _cached_installed(sid: str) -> Optional[list[str]]:
+    """Return the cached installed-package list for *sid* if fresh, else None."""
+    entry = _shell_list_cache.get(sid)
+    if entry is None:
+        return None
+    ts, installed = entry
+    if time.monotonic() - ts >= _SHELL_LIST_TTL:
+        _shell_list_cache.pop(sid, None)
+        return None
+    return installed
+
+
+def _cache_installed(sid: str, installed: list[str]) -> None:
+    _shell_list_cache[sid] = (time.monotonic(), installed)
+
+
+def _invalidate_shell_list_cache(sid: Optional[str] = None) -> None:
+    """Drop cached package lists (all, or just *sid*'s) after a mutation."""
+    if sid is None:
+        _shell_list_cache.clear()
+    else:
+        _shell_list_cache.pop(sid, None)
+
+
+def _shell_list(session) -> list[str]:
+    """Return the container command inventory: policy table + installed pkgs."""
+    from rattan import policy
+
+    names = sorted(policy.POLICY_TABLE.keys())
+    sid = session.sid if session is not None else None
+    installed = _cached_installed(sid) if sid is not None else None
+    if installed is None:
+        if session is not None:
+            try:
+                r = pacman.pacman_run(session, ["-Qq"], timeout=30)
+                if r["rc"] == 0:
+                    installed = [
+                        ln.strip() for ln in r["output"].splitlines() if ln.strip()
+                    ]
+                    if sid is not None:
+                        _cache_installed(sid, installed)
+            except Exception:
+                installed = []
+        if installed is None:
+            installed = []
+    names.extend(installed[:200])
+    return sorted(set(names))
+
+
+# ---------------------------------------------------------------------------
 # Tool builders
 # ---------------------------------------------------------------------------
 
@@ -120,11 +182,15 @@ def _build_tools(fastmcp: FastMCP):
         structured: bool = True,
     ) -> dict | str:
         """Execute a command in the rattan sandbox."""
+        from rattan.executor import _TIMING, _timing_log
+
         nonlocal session
         if session is None:
             session = sessions.get_or_create()
             provision(session)
 
+        t_total = time.perf_counter() if _TIMING else 0.0
+        t_parse = time.perf_counter() if _TIMING else 0.0
         try:
             program = parse(command)
         except ParseError as e:
@@ -134,6 +200,8 @@ def _build_tools(fastmcp: FastMCP):
                 "stages": [{"command": command, "output": str(e), "rc": 1}],
                 "output": str(e),
             }
+        if _TIMING:
+            _timing_log(f"parse_ms={(time.perf_counter() - t_parse) * 1000:.2f} cmd={command!r}")
 
         env_store = {
             "HOME": "/workspace",
@@ -162,6 +230,9 @@ def _build_tools(fastmcp: FastMCP):
                 "stages": [],
                 "output": "",
             }
+
+        if _TIMING:
+            _timing_log(f"total_ms={(time.perf_counter() - t_total) * 1000:.2f} cmd={command!r}")
 
         if not structured:
             return result["output"]
@@ -217,6 +288,7 @@ def _build_tools(fastmcp: FastMCP):
         if session is None:
             return {"status": "no active session"}
         layers.reset(session)
+        _invalidate_shell_list_cache(session.sid)
         return {"status": "reset", "session_id": session.sid}
 
     @fastmcp.tool(
@@ -238,6 +310,7 @@ def _build_tools(fastmcp: FastMCP):
         if session is None:
             return {"error": "no active session"}
         ref = layers.commit(session, message=message)
+        _invalidate_shell_list_cache(session.sid)
         return {
             "commit_id": ref.commit_id,
             "message": ref.message,
@@ -278,6 +351,7 @@ def _build_tools(fastmcp: FastMCP):
             layers.rollback(session, to_commit_id)
         except ValueError as e:
             return {"error": str(e)}
+        _invalidate_shell_list_cache(session.sid)
         return {
             "status": "rolled back",
             "session_id": session.sid,
@@ -312,12 +386,16 @@ def _build_tools(fastmcp: FastMCP):
         timeout: float = 300,
     ) -> dict:
         try:
-            return pacman.pacman_install(
+            result = pacman.pacman_install(
                 sessions.current(), packages,
                 refresh=refresh, mirror=mirror, timeout=timeout,
             )
         except ValueError as e:
             return {"rc": 1, "command": "pacman -S", "output": str(e), "packages": []}
+        s = sessions.current()
+        if s is not None:
+            _invalidate_shell_list_cache(s.sid)
+        return result
 
     @fastmcp.tool(
         description=(
@@ -450,16 +528,7 @@ def _build_tools(fastmcp: FastMCP):
         )
     )
     def shell_list() -> list[str]:
-        from rattan import policy
-        names = sorted(policy.POLICY_TABLE.keys())
-        try:
-            r = pacman.pacman_run(sessions.current(), ["-Qq"], timeout=30)
-            if r["rc"] == 0:
-                installed = [ln.strip() for ln in r["output"].splitlines() if ln.strip()]
-                names.extend(installed[:200])
-        except Exception:
-            pass
-        return sorted(set(names))
+        return _shell_list(sessions.current())
 
     # ---- Sandboxed file tools --------------------------------------------
 
