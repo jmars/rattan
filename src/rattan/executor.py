@@ -10,7 +10,9 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -116,6 +118,49 @@ _CONTROL_ENV_PREFIXES = (
 def _scrub_control_env(env: dict[str, str]) -> dict[str, str]:
     """Return *env* with every control-prefixed key removed."""
     return {k: v for k, v in env.items() if not k.startswith(_CONTROL_ENV_PREFIXES)}
+
+
+# Minimal environment for bwrap subprocesses. The container process and
+# stage3's execvp need PATH/HOME/etc; the host's ``os.environ`` (even scrubbed)
+# leaks ~50 unrelated keys and buys nothing for the unprivileged uid-1000
+# container. ``inv.env`` carries the stage3 vars + per-command assignments on
+# top of this base (see :func:`build_invocation`).
+MINIMAL_CONTAINER_ENV: dict[str, str] = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME": "/workspace",
+    "USER": "rattan",
+    "TERM": "dumb",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+}
+
+
+def _build_subprocess_env(inv_env: dict[str, str]) -> dict[str, str]:
+    """Merge the minimal container env with *inv_env* (stage3 + user vars).
+
+    Used for every bwrap subprocess so the host environment is never leaked
+    into the container.
+    """
+    env = dict(MINIMAL_CONTAINER_ENV)
+    env.update(inv_env)
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Optional timing diagnostic (RATTAN_TIMING=1)
+# ---------------------------------------------------------------------------
+
+_TIMING = os.environ.get("RATTAN_TIMING") == "1"
+
+
+def _timing_log(msg: str) -> None:
+    """Emit a timing line to stderr when ``RATTAN_TIMING=1`` (else a no-op).
+
+    Opt-in and zero-cost when unset: the per-stage ``perf_counter`` calls are
+    guarded by ``_TIMING``, so the hot path does no extra work by default.
+    """
+    if _TIMING:
+        print(f"[rattan-timing] {msg}", file=sys.stderr, flush=True)
 
 
 def build_invocation(
@@ -414,6 +459,40 @@ def _spawn_kwargs(fd_plan) -> tuple[dict, list]:
 # ---------------------------------------------------------------------------
 
 
+# Per-overlay-upper mount locks. Consecutive foreground commands mount the same
+# session upper/work; holding this lock across the spawn+communicate cycle
+# serializes those mounts so a new command never races a prior command's
+# namespace teardown (btrfs ``EBUSY``). Background jobs use private upper/work
+# and never pass through :func:`run_command`, so they are unaffected. The dict
+# is keyed by upperdir path (one lock per session) and grows by one entry per
+# session lifetime — bounded by the number of sessions in a server run.
+_overlay_locks: dict[str, threading.Lock] = {}
+_overlay_locks_guard = threading.Lock()
+
+
+def _overlay_mount_lock(upper: str) -> threading.Lock:
+    """Return (creating if needed) the mount lock for overlay *upper* dir."""
+    with _overlay_locks_guard:
+        lock = _overlay_locks.get(upper)
+        if lock is None:
+            lock = threading.Lock()
+            _overlay_locks[upper] = lock
+        return lock
+
+
+def _overlay_upper(inv: Invocation) -> str:
+    """Return the overlay upper dir from *inv*'s bwrap argv (the lock key).
+
+    ``bwrap.agent_argv`` always emits ``--overlay <upper> <work> <dest>``, so
+    the token following ``--overlay`` is the upper path. Returns ``""`` if the
+    argv has no overlay mount (shouldn't happen on the foreground path).
+    """
+    try:
+        return inv.bwrap_argv[inv.bwrap_argv.index("--overlay") + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
 def run_command(inv: Invocation) -> dict:
     """Spawn *inv* as a foreground bwrap subprocess and return structured output.
 
@@ -423,7 +502,9 @@ def run_command(inv: Invocation) -> dict:
     On btrfs the previous command's overlay mount namespace teardown can race
     with the next ``--overlay`` mount reusing the same upperdir+workdir, so
     bwrap occasionally exits with ``EBUSY`` ("Device or resource busy"). We
-    retry with a short backoff until the teardown completes (bounded).
+    serialize consecutive mounts of the same upper via a per-session lock so a
+    new command waits for the prior one to finish, and keep a short bounded
+    retry as a safety net for the residual teardown lag after process exit.
     """
     _EBUSY = "Device or resource busy"
     max_attempts = 5
@@ -441,12 +522,18 @@ def run_command(inv: Invocation) -> dict:
             return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
 
         try:
+            t_popen = time.perf_counter() if _TIMING else 0.0
             proc = subprocess.Popen(
                 inv.bwrap_argv,
-                env={**_scrub_control_env(os.environ), **inv.env},
+                env=_build_subprocess_env(inv.env),
                 start_new_session=True,
                 **spawn_kwargs,
             )
+            if _TIMING:
+                _timing_log(
+                    f"popen_ms={(time.perf_counter() - t_popen) * 1000:.2f} "
+                    f"cmd={inv.command!r}"
+                )
         except (OSError, IOError) as e:
             for f in opened:
                 try:
@@ -461,7 +548,13 @@ def run_command(inv: Invocation) -> dict:
             return {"command": inv.command, "output": f"redirect error: {e}", "rc": 1}
 
         try:
+            t_comm = time.perf_counter() if _TIMING else 0.0
             out_bytes, _ = proc.communicate(timeout=inv.timeout)
+            if _TIMING:
+                _timing_log(
+                    f"communicate_ms={(time.perf_counter() - t_comm) * 1000:.2f} "
+                    f"cmd={inv.command!r}"
+                )
             rc = proc.returncode
         except subprocess.TimeoutExpired:
             try:
@@ -489,13 +582,20 @@ def run_command(inv: Invocation) -> dict:
         output = out_bytes.decode("utf-8", errors="replace") if out_bytes else ""
         return {"command": inv.command, "output": output, "rc": rc}
 
-    result = _attempt()
-    for _ in range(max_attempts - 1):
-        if result["rc"] != 1 or _EBUSY not in result["output"]:
-            break
-        time.sleep(backoff)
+    def _run_with_retry():
         result = _attempt()
-    return result
+        for _ in range(max_attempts - 1):
+            if result["rc"] != 1 or _EBUSY not in result["output"]:
+                break
+            time.sleep(backoff)
+            result = _attempt()
+        return result
+
+    upper = _overlay_upper(inv)
+    if not upper:
+        return _run_with_retry()
+    with _overlay_mount_lock(upper):
+        return _run_with_retry()
 
 
 # ---------------------------------------------------------------------------
@@ -523,13 +623,19 @@ def execute_pipeline(
         raise EmptyInvocation("empty pipeline")
 
     if len(pipeline.commands) == 1:
+        t_build = time.perf_counter() if _TIMING else 0.0
         inv = build_invocation(
             pipeline.commands[0], session, env_store, cwd, timeout
         )
+        if _TIMING:
+            _timing_log(f"build_ms={(time.perf_counter() - t_build) * 1000:.2f}")
         return run_command(inv)
 
     # Multi-command pipeline: single-sandbox execution via /bin/sh -c.
+    t_build = time.perf_counter() if _TIMING else 0.0
     inv = build_pipeline_invocation(pipeline, session, env_store, cwd, timeout)
+    if _TIMING:
+        _timing_log(f"build_ms={(time.perf_counter() - t_build) * 1000:.2f}")
     result = run_command(inv)
     result["command"] = command_str or result["command"]
     return result
