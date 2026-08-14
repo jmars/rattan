@@ -159,4 +159,4 @@ make test     # 187 tests
 ## Docs
 
 `docs/architecture.md` · `docs/implementation-plan.md` ·
-`docs/security-invariants.md` · `docs/bootstrap.md`
+`docs/security-invariants.md` · `docs/bootstrap.md` · `docs/decisions/`
