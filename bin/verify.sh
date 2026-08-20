@@ -45,7 +45,7 @@ say "   ok"
 
 # 4. Overlay assert: bwrap mounts the base rootfs overlay at /
 say "4/5 overlay mount"
-BASE="$HOME/.local/share/rattan/rootfs/base"
+BASE="${RATTAN_DATA_DIR:-$HOME/.local/share/rattan}/rootfs/base"
 [ -d "$BASE" ] || fail "base rootfs not bootstrapped — run 'make bootstrap-rootfs'"
 D=$(mktemp -d /tmp/rattan-verify.XXXX)
 mkdir -p "$D/upper/workspace" "$D/work"
@@ -68,7 +68,7 @@ with mock.patch.object(config, "data_dir", return_value=tmp), \
      mock.patch.object(config, "layers_dir", lambda: os.path.join(tmp,"layers")), \
      mock.patch.object(config, "sessions_dir", lambda: os.path.join(tmp,"sessions")), \
      mock.patch.object(config, "index_lock_path", lambda: os.path.join(tmp,"layers","index.lock")), \
-     mock.patch.object(config, "base_rootfs_path", lambda: os.path.join(os.environ["HOME"],".local","share","rattan","rootfs","base")):
+     mock.patch.object(config, "base_rootfs_path", lambda: os.path.join(os.environ.get("RATTAN_DATA_DIR", os.path.join(os.environ["HOME"],".local","share","rattan")), "rootfs", "base")):
     from rattan.executor import execute_program
     from rattan.parser import parse
     s = sessions.get_or_create(sid="verify")

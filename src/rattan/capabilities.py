@@ -134,10 +134,21 @@ _USERSN_SYSCTL = "/proc/sys/kernel/unprivileged_userns_clone"
 
 
 def userns_enabled(path=_USERSN_SYSCTL):
-    """available = unprivileged user namespaces are enabled."""
+    """available = unprivileged user namespaces are enabled.
+
+    The canonical signal is the ``kernel.unprivileged_userns_clone`` sysctl
+    (Debian/Arch). Some kernels (e.g. openSUSE's ``-default``) enable
+    unprivileged userns unconditionally and expose **no** sysctl file at all.
+    For those, missing file is NOT "disabled" — fall back to a live runtime
+    probe (``unshare --user --map-root-user``) so a working kernel isn't
+    falsely rejected by the startup gate.
+    """
     try:
         with open(path) as f:
             val = f.read().strip()
+    except FileNotFoundError:
+        # Sysctl absent -> kernel may still allow unprivileged userns. Probe it.
+        return _userns_runtime_probe(path)
     except OSError as e:
         return Capability(
             "userns_enabled",
@@ -156,6 +167,52 @@ def userns_enabled(path=_USERSN_SYSCTL):
         "userns_enabled",
         available,
         detail,
+        required=True,
+        remediation=_REMEDIATION["userns_enabled"],
+    )
+
+
+def _userns_runtime_probe(path):
+    """Fall back to a live unprivileged-userns probe when the sysctl is absent.
+
+    ``unshare --user --map-root-user`` requires unprivileged userns; rc==0
+    proves the kernel allows it. ``unshare`` ships in util-linux.
+    """
+    try:
+        out = subprocess.run(
+            ["unshare", "--user", "--map-root-user", "true"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return Capability(
+            "userns_enabled",
+            False,
+            f"no {path} and 'unshare' not found; cannot confirm userns",
+            required=True,
+            remediation=_REMEDIATION["userns_enabled"],
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return Capability(
+            "userns_enabled",
+            False,
+            f"no {path} and userns runtime probe failed: {e}",
+            required=True,
+            remediation=_REMEDIATION["userns_enabled"],
+        )
+    if out.returncode == 0:
+        return Capability(
+            "userns_enabled",
+            True,
+            f"{path} absent; unprivileged userns confirmed via unshare probe",
+            required=True,
+            remediation=_REMEDIATION["userns_enabled"],
+        )
+    return Capability(
+        "userns_enabled",
+        False,
+        f"no {path} and unshare probe failed (rc={out.returncode}): {out.stderr.strip()[:120]}",
         required=True,
         remediation=_REMEDIATION["userns_enabled"],
     )

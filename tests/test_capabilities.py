@@ -54,8 +54,27 @@ class UsernsTest(unittest.TestCase):
         finally:
             os.unlink(p)
 
-    def test_missing_file(self):
+    def test_missing_file_falls_back_to_runtime_probe(self):
+        # Missing sysctl is NOT "disabled" — the gate falls back to a live
+        # unshare probe (kernels like openSUSE expose no userns sysctl).
         c = capabilities.userns_enabled("/nonexistent/userns-ctl")
+        self.assertTrue(c.required)
+        # Whether it's available now depends on the host kernel allowing
+        # unprivileged userns; on a working kernel the fallback returns True.
+        if c.available:
+            self.assertIn("unshare probe", c.detail)
+        else:
+            self.assertIn("probe failed", c.detail)
+
+    def test_missing_file_probe_failure_disables(self):
+        class _FakeResult:
+            returncode = 1
+            stderr = "operation not permitted"
+
+        with mock.patch(
+            "rattan.capabilities.subprocess.run", return_value=_FakeResult()
+        ):
+            c = capabilities.userns_enabled("/nonexistent/userns-ctl")
         self.assertFalse(c.available)
         self.assertTrue(c.required)
 
