@@ -18,10 +18,10 @@ import subprocess
 import unittest
 from unittest import mock
 
-from palisade import executor
+from rattan import executor
 from rattan import server
-from palisade.executor import Invocation
-from palisade.redirects import FdPlan
+from rattan.executor import Invocation
+from rattan.redirects import FdPlan
 
 
 # ---------------------------------------------------------------------------

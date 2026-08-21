@@ -19,10 +19,10 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from palisade import capabilities, config, layers, pacman, policy, sessions
-from palisade.executor import InvocationError, EmptyInvocation, execute_program
-from palisade.overlay import provision
-from palisade.parser import parse, ParseError
+from rattan import capabilities, config, layers, pacman, policy, sessions
+from rattan.executor import InvocationError, EmptyInvocation, execute_program
+from rattan.overlay import provision
+from rattan.parser import parse, ParseError
 
 # ---------------------------------------------------------------------------
 # Startup gate
@@ -136,7 +136,7 @@ def _invalidate_shell_list_cache(sid: Optional[str] = None) -> None:
 
 def _shell_list(session) -> list[str]:
     """Return the container command inventory: policy table + installed pkgs."""
-    from palisade import policy
+    from rattan import policy
 
     names = sorted(policy.POLICY_TABLE.keys())
     sid = session.sid if session is not None else None
@@ -182,7 +182,7 @@ def _build_tools(fastmcp: FastMCP):
         structured: bool = True,
     ) -> dict | str:
         """Execute a command in the rattan sandbox."""
-        from palisade.executor import _TIMING, _timing_log
+        from rattan.executor import _TIMING, _timing_log
 
         nonlocal session
         if session is None:
@@ -424,7 +424,7 @@ def _build_tools(fastmcp: FastMCP):
         cwd: str = "/workspace",
         timeout: int = 300,
     ) -> dict:
-        from palisade import bgdriver, jobs, layers
+        from rattan import bgdriver, jobs, layers
 
         s = sessions.current()
         if s is None:
@@ -456,7 +456,7 @@ def _build_tools(fastmcp: FastMCP):
 
     @fastmcp.tool(description="Report the status of a background job (no polling).")
     def shell_job_status(job_id: int) -> dict:
-        from palisade import jobs
+        from rattan import jobs
         return jobs.job_status(job_id)
 
     @fastmcp.tool(
@@ -466,24 +466,24 @@ def _build_tools(fastmcp: FastMCP):
         )
     )
     def shell_job_wait(job_id: int, wait_seconds: float = 30.0) -> dict:
-        from palisade import jobs
+        from rattan import jobs
         return jobs.job_wait(job_id, wait_seconds)
 
     @fastmcp.tool(
         description="Return the (tail of the) output log for a background job."
     )
     def shell_job_output(job_id: int, tail_bytes: int = 8192) -> dict:
-        from palisade import jobs
+        from rattan import jobs
         return jobs.job_output(job_id, tail_bytes)
 
     @fastmcp.tool(description="Kill a running background job.")
     def shell_job_kill(job_id: int) -> dict:
-        from palisade import jobs
+        from rattan import jobs
         return jobs.job_kill(job_id)
 
     @fastmcp.tool(description="List all background jobs.")
     def shell_job_list() -> list[dict]:
-        from palisade import jobs
+        from rattan import jobs
         return jobs.list_jobs()
 
     # ---- Host dir binding -------------------------------------------------
@@ -501,7 +501,7 @@ def _build_tools(fastmcp: FastMCP):
         mount_point: str,
         mode: str = "ro",
     ) -> dict:
-        from palisade import bind
+        from rattan import bind
 
         s = sessions.current()
         if s is None:
@@ -541,7 +541,7 @@ def _build_tools(fastmcp: FastMCP):
         )
     )
     def read_file(file_path: str, offset: int | None = None, limit: int = 2000) -> dict:
-        from palisade import filetools
+        from rattan import filetools
         nonlocal session
         if session is None:
             session = sessions.get_or_create()
@@ -557,7 +557,7 @@ def _build_tools(fastmcp: FastMCP):
         )
     )
     def write_file(file_path: str, content: str) -> dict:
-        from palisade import filetools
+        from rattan import filetools
         nonlocal session
         if session is None:
             session = sessions.get_or_create()
@@ -578,7 +578,7 @@ def _build_tools(fastmcp: FastMCP):
         new_string: str,
         replace_all: bool = False,
     ) -> dict:
-        from palisade import filetools
+        from rattan import filetools
         nonlocal session
         if session is None:
             session = sessions.get_or_create()
@@ -601,7 +601,7 @@ def _build_tools(fastmcp: FastMCP):
         max_matches: int | None = None,
         use_default_ignore: bool = True,
     ) -> dict:
-        from palisade import filetools
+        from rattan import filetools
         nonlocal session
         if session is None:
             session = sessions.get_or_create()
@@ -670,7 +670,7 @@ def main(argv=None):
 
     # Configure default host binds (auto-applied to every session). Fail fast on
     # a bad spec so a misconfigured bind is caught at startup, not per-command.
-    from palisade import bind
+    from rattan import bind
     try:
         defaults = [
             bind.validate_host_bind(host, mount, mode)

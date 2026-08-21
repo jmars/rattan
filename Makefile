@@ -1,5 +1,5 @@
 PY := .venv/bin/python
-PYTHONPATH ?= src:vendor/palisade/src
+PYTHONPATH := src
 export PYTHONPATH
 
 .PHONY: all submodule core test lint

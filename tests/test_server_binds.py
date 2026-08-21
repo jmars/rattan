@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-from palisade import bind
+from rattan import bind
 from rattan.server import _parse_default_binds
 
 class TestDefaultBinds(unittest.TestCase):
@@ -53,7 +53,7 @@ class TestDefaultBinds(unittest.TestCase):
 
     def test_bind_cwd_binds_launch_dir_to_workspace(self):
         """--bind-cwd binds the server launch dir onto /workspace (rw)."""
-        from palisade import bind
+        from rattan import bind
         from rattan.server import _parse_default_binds
         # Simulate main()'s --bind-cwd handling: build the default list exactly
         # as main() does (parsed binds + a validate of os.getcwd() -> /workspace).
@@ -83,7 +83,7 @@ class TestDefaultBinds(unittest.TestCase):
             self.assertEqual(ws[0].host_path, os.path.realpath(host))
         finally:
             os.chdir(old_cwd)
-            from palisade import bind as _b
+            from rattan import bind as _b
             _b.set_default_binds([])
             _b.clear_session_binds("bindcwd-sid")
             import shutil
