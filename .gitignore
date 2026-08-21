@@ -10,15 +10,9 @@ dist/
 rootfs/
 sessions/
 layers/
-# Built binaries (sources at src/rattan/stage3.c and tests/probes/*.c).
+# Built binaries (sources now in vendor/palisade/src/palisade/stage3.c and vendor/palisade/tests/probes/*.c).
 # Note: bin/ is NOT ignored as a whole — bin/bootstrap-rootfs.sh is committed
-# source; only the built stage3 binary is ignored.
-bin/stage3
-tests/probes/keytest
-tests/probes/ptracetest
-tests/probes/mounttest
-tests/probes/unsharetest
-tests/probes/reverse_order_probe
+# source; built stage3 and probes now live under vendor/palisade.
 # cosmocc build intermediates (fat APE + multi-arch artifacts)
 *.ape
 *.com.dbg
